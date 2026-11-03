@@ -1,3 +1,4 @@
+-- Hey bro, if you see an open script, then why? Yeah, I just don't like Roblox anymore. You can take the script, but please, can you mention me somewhere @Poiuytr, my main Discord account @poiytr12345678. Good luck bro!
 pcall(function()
 	if getgenv and getgenv().UnloadBuloHub then
 		getgenv().UnloadBuloHub()
