@@ -25,7 +25,6 @@ local function __Ixa_searchLower(value)
     return string.lower(tostring(value or ""))
 end
 
-
 local a = (function()
 	local __Ixa_guiTweenService = game:GetService("TweenService")
 	local __Ixa_guiInputService = game:GetService("UserInputService")
@@ -5084,7 +5083,14 @@ SOFTWARE.]==]
 				syn.protect_gui(bd)
 			end
 		end)
-		bd.Parent = a4.Parent or __Ixa_guiParent()
+		local mounted = false
+		if type(a4.AttachGui) == "function" then
+			local ok, result = pcall(a4.AttachGui, bd)
+			mounted = ok and result == true
+		end
+		if not mounted then
+			bd.Parent = a4.Parent or __Ixa_guiParent()
+		end
 		bf.Scale = 0.9
 		bg.ImageTransparency = 1
 		a7.BodyStroke.Transparency = 1
@@ -7190,7 +7196,7 @@ SOFTWARE.]==]
 		local bl = self._loadingOrder or __Ixa_guiLibrary.LoadingOrder
 		local bm = {}
 		for bn, bo in pairs(bi) do
-			if not bk[bn] then
+			if not bk[bn] and not (self._startupExcluded and self._startupExcluded[bn]) then
 				local bp = __Ixa_guiLibrary.Flags[bn]
 				if bp and type(bp.Set) == "function" then
 					if bg(bp, bo) then
@@ -21838,6 +21844,9 @@ local defaults = {
     bossColor = 0xFF6464,
     espObjectives = false,
     espPickups = false,
+    eventTracker = false,
+    threatTracker = false,
+    threatRange = 200,
     espDistance = 800,
     fullbright = false,
     noFog = false,
@@ -21856,6 +21865,7 @@ local numeric = {
     aimColor = {0, 16777215},
     mobColor = {0, 16777215},
     bossColor = {0, 16777215},
+    threatRange = {25, 1000},
     espDistance = {100, 3000},
     fov = {40, 120},
 }
@@ -21867,6 +21877,10 @@ local choices = {
 }
 
 local settings = table.clone(defaults)
+local startupManual = {}
+for key, value in pairs(defaults) do
+    if type(value) == "boolean" and value == false then startupManual[key] = true end
+end
 
 function App.connect(signal, callback)
     local connection = signal:Connect(callback)
@@ -22014,7 +22028,7 @@ function Save.schedule()
 end
 
 Save.load()
-if settings.autoFire then settings.silentAim = true end
+for key in pairs(startupManual) do settings[key] = false end
 
 function Guard.read(record)
     if record.attribute then
@@ -22155,19 +22169,87 @@ if not playerGui then
     return
 end
 
+function UI.guiParents(preferred)
+    local parents, seen = {}, {}
+    local function add(parent)
+        if typeof(parent) ~= "Instance" or seen[parent] then return end
+        local ok, suitable = pcall(function()
+            return (parent:IsA("BasePlayerGui") or parent:IsA("Folder"))
+                and (not parent:IsA("PlayerGui") or parent.Parent == LocalPlayer)
+        end)
+        if ok and suitable then
+            seen[parent] = true
+            table.insert(parents, parent)
+        end
+    end
+    add(preferred)
+    local current = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    add(current)
+    if playerGui.Parent == LocalPlayer then add(playerGui) end
+    return parents
+end
+
+function UI.attach(object, preferred, protected)
+    if typeof(object) ~= "Instance" then return nil end
+    if not protected then
+        pcall(function()
+            if object:IsA("ScreenGui") and type(syn) == "table" and type(syn.protect_gui) == "function" then
+                syn.protect_gui(object)
+            end
+        end)
+    end
+    local function try(parent)
+        if typeof(parent) ~= "Instance" then return nil end
+        local valid, suitable = pcall(function()
+            return (parent:IsA("BasePlayerGui") or parent:IsA("Folder"))
+                and (not parent:IsA("PlayerGui") or parent.Parent == LocalPlayer)
+        end)
+        if not valid or not suitable then return nil end
+        local ok = pcall(function() object.Parent = parent end)
+        if ok then
+            local readOk, current = pcall(function() return object.Parent end)
+            if readOk and current == parent then return parent end
+        end
+        return nil
+    end
+    local mounted = try(preferred)
+    if mounted then return mounted end
+    if type(gethui) == "function" then
+        local ok, hidden = pcall(gethui)
+        if ok and hidden ~= preferred then
+            mounted = try(hidden)
+            if mounted then return mounted end
+        end
+    end
+    local ok, core = pcall(game.GetService, game, "CoreGui")
+    if ok and core ~= preferred then
+        mounted = try(core)
+        if mounted then return mounted end
+    end
+    for _, parent in ipairs(UI.guiParents()) do
+        if parent ~= preferred then
+            mounted = try(parent)
+            if mounted then return mounted end
+        end
+    end
+    return nil
+end
+
 local screen = Instance.new("ScreenGui")
 screen.Name = "HallowedReactorHub"
 screen.ResetOnSpawn = false
 screen.IgnoreGuiInset = true
 screen.DisplayOrder = 10000
 screen.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-screen.Parent = playerGui
+local guiHost = UI.attach(screen)
+if not guiHost then
+    pcall(function() screen:Destroy() end)
+    return
+end
 UI.screen = screen
 
-local visualFolder = Instance.new("Folder")
-visualFolder.Name = "HallowedReactorHubVisuals"
-visualFolder.Parent = playerGui
-Visual.folder = visualFolder
+local visualFolder = nil
+Visual.folder = nil
 
 local palette = {
     accent = Color3.fromRGB(255, 158, 200),
@@ -22231,6 +22313,42 @@ fpsLabel.TextXAlignment = Enum.TextXAlignment.Right
 fpsLabel.Visible = false
 UI.fpsLabel = fpsLabel
 
+local trackerPanel = Instance.new("Frame")
+trackerPanel.Name = "Trackers"
+trackerPanel.Position = UDim2.new(0, 12, 0.66, 0)
+trackerPanel.Size = UDim2.new(1, -24, 0, 50)
+trackerPanel.BackgroundTransparency = 1
+trackerPanel.Visible = false
+trackerPanel.Parent = screen
+local trackerSize = Instance.new("UISizeConstraint")
+trackerSize.MaxSize = Vector2.new(320, 50)
+trackerSize.Parent = trackerPanel
+
+local function trackerLabel(name, color)
+    local label = UI.label(trackerPanel, name .. ": --", 13, color)
+    label.Name = name
+    label.Size = UDim2.new(1, 0, 0, 22)
+    label.BackgroundColor3 = Color3.fromRGB(28, 23, 32)
+    label.BackgroundTransparency = 0.22
+    label.BorderSizePixel = 0
+    label.Font = Enum.Font.GothamMedium
+    label.TextTruncate = Enum.TextTruncate.AtEnd
+    label.TextStrokeTransparency = 0.5
+    label.Visible = false
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 5)
+    corner.Parent = label
+    local padding = Instance.new("UIPadding")
+    padding.PaddingLeft = UDim.new(0, 8)
+    padding.PaddingRight = UDim.new(0, 6)
+    padding.Parent = label
+    return label
+end
+
+UI.trackerPanel = trackerPanel
+UI.eventLabel = trackerLabel("EVENT", Color3.fromRGB(255, 222, 154))
+UI.threatLabel = trackerLabel("THREATS", Color3.fromRGB(255, 179, 193))
+
 function App.notice(text)
     if UI.window and not UI.window._destroyed and type(UI.window.Notify) == "function" then
         pcall(UI.window.Notify, UI.window, {Title = "HALLOWED REACTOR", Content = tostring(text), Duration = 4})
@@ -22240,6 +22358,10 @@ end
 function UI.refreshOverlays()
     UI.crosshair.Visible = settings.crosshair and not UI.open
     UI.fpsLabel.Visible = settings.fps
+    UI.trackerPanel.Visible = (settings.eventTracker or settings.threatTracker) and not UI.open
+    UI.eventLabel.Visible = settings.eventTracker
+    UI.threatLabel.Visible = settings.threatTracker
+    UI.threatLabel.Position = UDim2.fromOffset(0, settings.eventTracker and 26 or 0)
     UI.aimCircle.Visible = settings.showAimFov and settings.aimMode == "Screen" and not UI.open
     UI.aimCircle.Size = UDim2.fromOffset(settings.aimRadius * 2, settings.aimRadius * 2)
     UI.aimStroke.Color = UI.color(settings.aimColor)
@@ -22780,6 +22902,36 @@ function World.validPosition(position)
     return typeof(position) == "Vector3" and position.X == position.X and position.Y == position.Y and position.Z == position.Z and math.abs(position.X) < 10000000 and math.abs(position.Y) < 10000000 and math.abs(position.Z) < 10000000
 end
 
+function World.objectiveEntry(child)
+    if not child:IsA("Folder") and not child:IsA("Vector3Value") then return nil end
+    local marker = child:FindFirstChild("Marker")
+    local markerTarget = marker and marker:IsA("ObjectValue") and marker.Value or nil
+    local path = child:GetAttribute("LocalHighlightTargetPath")
+    local position = World.position(markerTarget)
+    if not World.validPosition(position) then position = child:GetAttribute("MinimapPosition") end
+    if not World.validPosition(position) then position = child:GetAttribute("MarkerPosition") end
+    if not World.validPosition(position) then position = World.position(child) end
+    if not World.validPosition(position) and type(path) == "string" then
+        position = World.position(World.resolvePath(path))
+    end
+    if not World.validPosition(position) then return nil end
+    local name = child:GetAttribute("Text") or child:GetAttribute("ObjectiveId") or child.Name
+    return {key = child, name = tostring(name or "Objective"), position = position}, path
+end
+
+function World.eventObjectives()
+    local entries = {}
+    local folder = ReplicatedStorage:FindFirstChild("PostGameEventMarkers")
+    if folder then
+        for _, child in ipairs(folder:GetChildren()) do
+            local entry = World.objectiveEntry(child)
+            if entry then table.insert(entries, entry) end
+            if #entries >= 200 then break end
+        end
+    end
+    return entries
+end
+
 function World.objectives()
     local entries = {}
     local paths = {}
@@ -22793,28 +22945,10 @@ function World.objectives()
             return
         end
         for _, child in ipairs(folder:GetChildren()) do
-            if child:IsA("Folder") or child:IsA("Vector3Value") then
-                local marker = child:FindFirstChild("Marker")
-                local markerTarget = marker and marker:IsA("ObjectValue") and marker.Value or nil
-                local path = child:GetAttribute("LocalHighlightTargetPath")
-                local position = World.position(markerTarget)
-                if not World.validPosition(position) then
-                    position = child:GetAttribute("MinimapPosition")
-                end
-                if not World.validPosition(position) then
-                    position = child:GetAttribute("MarkerPosition")
-                end
-                if not World.validPosition(position) then
-                    position = World.position(child)
-                end
-                if not World.validPosition(position) and type(path) == "string" then
-                    position = World.position(World.resolvePath(path))
-                end
-                if type(path) == "string" and World.validPosition(position) then
-                    paths[path] = true
-                end
-                local name = child:GetAttribute("Text") or child:GetAttribute("ObjectiveId") or child.Name
-                add(child, name, position)
+            local entry, path = World.objectiveEntry(child)
+            if entry then
+                if type(path) == "string" then paths[path] = true end
+                add(entry.key, entry.name, entry.position)
             end
         end
     end
@@ -23042,22 +23176,23 @@ function Visual.clearAll()
 end
 
 function Visual.ensureFolder()
-    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-    if not gui then
+    local parent = visualFolder and visualFolder.Parent
+    if parent and (not parent:IsA("PlayerGui") or LocalPlayer:FindFirstChildOfClass("PlayerGui") == parent) then
+        return true
+    end
+    Visual.clearAll()
+    if visualFolder then pcall(function() visualFolder:Destroy() end) end
+    visualFolder = nil
+    Visual.folder = nil
+    local folder = Instance.new("Folder")
+    folder.Name = "HallowedReactorHubVisuals"
+    local preferred = UI.window and UI.window.Gui and UI.window.Gui.Parent or screen.Parent or guiHost
+    if not UI.attach(folder, preferred, true) then
+        pcall(function() folder:Destroy() end)
         return false
     end
-    if not visualFolder or visualFolder.Parent ~= gui then
-        Visual.clearAll()
-        if visualFolder then
-            pcall(function()
-                visualFolder:Destroy()
-            end)
-        end
-        visualFolder = Instance.new("Folder")
-        visualFolder.Name = "HallowedReactorHubVisuals"
-        visualFolder.Parent = gui
-        Visual.folder = visualFolder
-    end
+    visualFolder = folder
+    Visual.folder = folder
     return true
 end
 
@@ -23419,13 +23554,16 @@ function Visual.updateObjectives(origin)
 end
 
 function Visual.update()
-    if not Visual.ensureFolder() then
-        return
-    end
     if not (settings.espPlayers or settings.espAllies or settings.espNPC or settings.mobBoxes or settings.mobSkeletons or settings.espBoss or settings.bossBoxes or settings.bossSkeletons or settings.espPickups or settings.espObjectives) then
         if next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
             Visual.clearAll()
         end
+        if visualFolder then pcall(function() visualFolder:Destroy() end) end
+        visualFolder = nil
+        Visual.folder = nil
+        return
+    end
+    if not Visual.ensureFolder() then
         return
     end
     local origin = World.origin()
@@ -23515,16 +23653,64 @@ end
 
 function World.isZombie(model)
     if not World.isHostile(model) or World.findPlayer(model) then return false end
-    local ai = model:FindFirstChild("AI")
-    local aiSettings = ai and ai:FindFirstChild("settings")
-    local hostile = aiSettings and aiSettings:FindFirstChild("playerHostile")
-    if hostile and hostile:IsA("BoolValue") then return hostile.Value == true end
-    if model:GetAttribute("Hostile") == true or model:GetAttribute("Enemy") == true or model:GetAttribute("Infected") == true or model:GetAttribute("Zombie") == true then return true end
     local name = string.lower(model.Name)
-    for _, term in ipairs({"infected", "zombie", "viral", "lurker", "mutant", "crawler", "grabby", "barnacle", "riser", "kamikaze", "slasher", "radaway", "vorax", "deceiver", "shielder", "gunner", "fury", "chimera", "cerberus", "gilbert", "d-zero", "dzero"}) do
+    if name == "rif" or string.match(name, "^rif[%s_%-]") then return false end
+    if model:GetAttribute("Infected") == true or model:GetAttribute("Zombie") == true then return true end
+    for _, term in ipairs({"infected", "zombie", "viral", "lurker", "mutant", "crawler", "grabby", "barnacle", "riser", "kamikaze", "slasher", "radaway", "vorax", "deceiver", "shielder", "gunner", "fury", "chimera", "cerberus", "gilbert", "d-zero", "dzero", "bomber", "leaper"}) do
         if string.find(name, term, 1, true) then return true end
     end
     return false
+end
+
+function World.threats(range)
+    local origin = World.origin()
+    if not World.validPosition(origin) then return nil end
+    local count, nearest, nearestDistance = 0, nil, math.huge
+    local maximumSquared = range * range
+    for _, model in ipairs(World.characterModels()) do
+        if World.isHostile(model, true) then
+            local part = World.characterPart(model)
+            local position = part and part.Position
+            if World.validPosition(position) then
+                local offset = position - origin
+                local squared = offset:Dot(offset)
+                if squared <= maximumSquared then
+                    count += 1
+                    if squared < nearestDistance then
+                        nearest, nearestDistance = model, squared
+                    end
+                end
+            end
+        end
+    end
+    return count, nearest, nearest and math.sqrt(nearestDistance) or nil
+end
+
+function UI.updateTrackers()
+    if settings.eventTracker then
+        local origin = World.origin()
+        local event, distance
+        if World.validPosition(origin) then event, distance = World.closest(World.eventObjectives()) end
+        if event and distance then
+            local name = string.gsub(tostring(event.name), "%c", " ")
+            UI.eventLabel.Text = string.format("EVENT: %s  [%d studs]", name, math.floor(distance + 0.5))
+        elseif not World.validPosition(origin) then
+            UI.eventLabel.Text = "EVENT: --"
+        else
+            UI.eventLabel.Text = "EVENT: no marker"
+        end
+    end
+    if settings.threatTracker then
+        local count, nearest, distance = World.threats(settings.threatRange)
+        if count == nil then
+            UI.threatLabel.Text = "THREATS: --"
+        elseif nearest and distance then
+            local name = string.gsub(tostring(nearest.Name), "%c", " ")
+            UI.threatLabel.Text = string.format("THREATS: %d  |  %s [%d studs]", count, name, math.floor(distance + 0.5))
+        else
+            UI.threatLabel.Text = "THREATS: 0"
+        end
+    end
 end
 
 function World.targetPoint(model)
@@ -23778,7 +23964,7 @@ function Silent.choose(origin, config, npcOnly)
     if not camera or camera.CameraType == Enum.CameraType.Scriptable or not humanoid or humanoid.Health <= 0 then return nil end
     local fire = type(config.fire) == "table" and config.fire or nil
     local configuredTravel = fire and fire.maxBulletTravelDistance
-    local maxTravel = (configuredTravel == nil or configuredTravel == false) and math.huge or configuredTravel
+    local maxTravel = (configuredTravel == nil or configuredTravel == false) and 2500 or configuredTravel
     if type(maxTravel) ~= "number" or maxTravel ~= maxTravel or maxTravel <= 0 then return nil end
     if Silent.speedTool == Combat.tool and Silent.speedFire == fire and Silent.liveMaxDistance then
         maxTravel = math.min(maxTravel, Silent.liveMaxDistance)
@@ -24260,8 +24446,8 @@ function Auto.step()
         return
     end
     if settings.autoReload then
-        local magazine = Reload.read(tool, now)
-        if magazine == 0 or now < Reload.pauseUntil then
+        local magazine, _, guiReloading = Reload.read(tool, now)
+        if guiReloading or magazine == 0 or now < Reload.pauseUntil then
             Auto.release(false)
             return
         end
@@ -24367,7 +24553,7 @@ function Reload.reset()
     Reload.labels = setmetatable({}, {__mode = "k"})
     Reload.sampleAt, Reload.learned, Reload.startedAt = 0, nil, nil
     Reload.sawReloading = false
-    Reload.lastTool, Reload.lastReadAt, Reload.lastCurrent, Reload.lastReserve = nil, nil, nil, nil
+    Reload.lastTool, Reload.lastReadAt, Reload.lastCurrent, Reload.lastReserve, Reload.lastReloading = nil, nil, nil, nil, nil
     Reload.dryAttempts = 0
 end
 
@@ -24405,6 +24591,31 @@ function Reload.guiVisible(label)
         node = node.Parent
     end
     return node == playerGui
+end
+
+function Reload.weaponGui(tool)
+    local gui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not gui or not tool or tool.Parent ~= LocalPlayer.Character then return nil, nil, false, false end
+    local found
+    for _, candidate in ipairs(gui:GetChildren()) do
+        if candidate:IsA("ScreenGui") and candidate.Name == tool.Name then
+            local data = candidate:FindFirstChild("Data")
+            local clip = data and data:FindFirstChild("clip")
+            local ammo = data and data:FindFirstChild("ammo")
+            local gunName = data and data:FindFirstChild("gunName")
+            if clip and ammo and gunName and gunName:IsA("TextLabel") and gunName.Text == tool.Name
+                and Reload.guiVisible(clip) and Reload.guiVisible(ammo) then
+                local magazine, reserve = Reload.number(clip.Text), Reload.number(ammo.Text)
+                local reloading = type(clip.Text) == "string" and string.match(clip.Text, "^%s*%-%-%s*$") ~= nil
+                if reserve ~= nil and (magazine ~= nil or reloading) then
+                    if found then return nil, nil, false, false end
+                    found = {magazine, reserve, reloading}
+                end
+            end
+        end
+    end
+    if found then return found[1], found[2], true, found[3] end
+    return nil, nil, false, false
 end
 
 function Reload.screenOf(label)
@@ -24500,17 +24711,19 @@ function Reload.sampleGui(now)
     if best then Reload.learned = best end
 end
 
-function Reload.cache(tool, now, current, reserve)
+function Reload.cache(tool, now, current, reserve, reloading)
     Reload.lastTool, Reload.lastReadAt = tool, now
-    Reload.lastCurrent, Reload.lastReserve = current, reserve
-    return current, reserve
+    Reload.lastCurrent, Reload.lastReserve, Reload.lastReloading = current, reserve, reloading == true
+    return current, reserve, Reload.lastReloading
 end
 
 function Reload.read(tool, now)
-    if not tool or tool.Parent ~= LocalPlayer.Character then return nil, nil end
+    if not tool or tool.Parent ~= LocalPlayer.Character then return nil, nil, false end
     if Reload.lastTool == tool and Reload.lastReadAt and now >= Reload.lastReadAt and now - Reload.lastReadAt < 0.04 then
-        return Reload.lastCurrent, Reload.lastReserve
+        return Reload.lastCurrent, Reload.lastReserve, Reload.lastReloading
     end
+    local magazine, spare, matched, reloading = Reload.weaponGui(tool)
+    if matched then return Reload.cache(tool, now, magazine, spare, reloading) end
     local roots = {tool}
     for _, name in ipairs(Reload.stateNames) do
         local root = tool:FindFirstChild(name)
@@ -24576,8 +24789,8 @@ function Reload.step()
     if not character or not tool or tool.Parent ~= character or not tool:IsA("Tool") or not camera or camera.CameraType == Enum.CameraType.Scriptable then return end
     local humanoid = character:FindFirstChildOfClass("Humanoid")
     if not humanoid or humanoid.Health <= 0 or Motion.blocked(character) then return end
-    local magazine, reserve = Reload.read(tool, now)
-    local reloading = Reload.isReloading(tool, character)
+    local magazine, reserve, guiReloading = Reload.read(tool, now)
+    local reloading = guiReloading or Reload.isReloading(tool, character)
     if Reload.startedAt then
         if reloading then
             Reload.sawReloading = true
@@ -24856,11 +25069,20 @@ function UI.build()
         end
     end
     local window = library:CreateWindow({
-        Name = "Ixa Hub HALLOWED REACTOR",
-        Title = "Ixa Hub",
+        Name = "Ixa Hub test HALLOWED REACTOR",
+        Title = "Ixa Hub test",
         LoadingSubtitle = "HALLOWED REACTOR",
         ToggleUIKeybind = "K",
-        Parent = playerGui,
+        Parent = guiHost,
+        AttachGui = function(gui)
+            local parent = UI.attach(gui, guiHost, true)
+            if not parent then return false end
+            if parent ~= guiHost then
+                guiHost = parent
+                UI.attach(screen, guiHost, true)
+            end
+            return true
+        end,
         OpenButton = false,
         ToggleButton = {Platform = "Both"},
         Size = UDim2.fromOffset(780, 560),
@@ -24999,6 +25221,10 @@ function UI.build()
     UI.addSlider(visual, "fov", "Field of View")
     UI.addToggle(visual, "crosshair", "Center Crosshair")
     UI.addToggle(visual, "fps", "Show FPS")
+    local trackers = visualsPage:CreateGroupbox({Name = "Trackers", Side = "Right"})
+    UI.addToggle(trackers, "eventTracker", "Post-Game Event Tracker")
+    UI.addToggle(trackers, "threatTracker", "Nearby Threat Tracker")
+    UI.addSlider(trackers, "threatRange", "Threat Range")
 
     local move = miscPage:CreateGroupbox({Name = "Movement", Side = "Left"})
     UI.addToggle(move, "speedEnabled", "Speed")
@@ -25053,9 +25279,17 @@ end
 
 function Promo.holder()
     if Promo.gui and Promo.gui.Parent then return Promo.gui end
-    for _, child in ipairs(playerGui:GetChildren()) do
-        if child:IsA("ScreenGui") and child.Name == "HallowedReactorDiscordPromo" then
-            pcall(function() child:Destroy() end)
+    if Promo.gui then pcall(function() Promo.gui:Destroy() end) end
+    Promo.gui = nil
+    local preferred = UI.window and UI.window.Gui and UI.window.Gui.Parent or screen.Parent or guiHost
+    for _, parent in ipairs(UI.guiParents(preferred)) do
+        local ok, children = pcall(function() return parent:GetChildren() end)
+        if ok and type(children) == "table" then
+            for _, child in ipairs(children) do
+                if child:IsA("ScreenGui") and child.Name == "HallowedReactorDiscordPromo" then
+                    pcall(function() child:Destroy() end)
+                end
+            end
         end
     end
     local gui = Instance.new("ScreenGui")
@@ -25064,7 +25298,10 @@ function Promo.holder()
     gui.IgnoreGuiInset = true
     gui.DisplayOrder = (UI.window and UI.window.Gui and UI.window.Gui.DisplayOrder or 10001) + 1
     gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-    gui.Parent = playerGui
+    if not UI.attach(gui, preferred) then
+        pcall(function() gui:Destroy() end)
+        return nil
+    end
     Promo.gui = gui
     return gui
 end
@@ -25457,6 +25694,9 @@ App.connect(RunService.Heartbeat, function(delta)
         if settings.espPlayers or settings.espAllies or settings.espNPC or settings.mobBoxes or settings.mobSkeletons or settings.espBoss or settings.bossBoxes or settings.bossSkeletons or settings.espPickups or settings.espObjectives or next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
             App.safe("ESP", Visual.update)
         end
+        if settings.eventTracker or settings.threatTracker then
+            App.safe("Trackers", UI.updateTrackers)
+        end
     end
     if elapsed.lighting >= 0.5 then
         elapsed.lighting = 0
@@ -25547,9 +25787,9 @@ function App.stop()
         end)
     end
     table.clear(App.connections)
-    pcall(function()
-        visualFolder:Destroy()
-    end)
+    if visualFolder then pcall(function() visualFolder:Destroy() end) end
+    visualFolder = nil
+    Visual.folder = nil
     pcall(function()
         screen:Destroy()
     end)
@@ -25620,7 +25860,12 @@ task.defer(function()
         UI.setOpen(desired)
     end
     UI.syncVisibility()
-    if type(UI.window.LoadAutoload) == "function" then
-        pcall(UI.window.LoadAutoload, UI.window)
+    local window = UI.window
+    if window and type(window.LoadAutoload) == "function" then
+        local excluded = {}
+        for key in pairs(startupManual) do excluded["HR_" .. key] = true end
+        window._startupExcluded = excluded
+        pcall(window.LoadAutoload, window)
+        window._startupExcluded = nil
     end
 end)
