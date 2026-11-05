@@ -66,7 +66,7 @@ if not Airflow then
 end
 getgenv().__IxaHubLibraryV2 = Airflow
 local KEYS = {
-	ui = "F9",
+	ui = "1488",
 }
 local Window
 local THEME = Airflow.ThemePresets.Sakura
