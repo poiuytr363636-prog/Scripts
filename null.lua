@@ -109,7 +109,7 @@ Window = Airflow:CreateWindow({
 		Name = "Home",
 		Title = "Ixa Hub",
 		Welcome = "Welcome back,",
-		Tier = "v2",
+		Tier = "v1",
 		Stats = { "Players", "Session", "FPS", "Ping", "Game", "Executor" },
 	},
 })
