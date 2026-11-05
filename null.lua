@@ -109,7 +109,7 @@ Window = Airflow:CreateWindow({
 		Name = "Home",
 		Title = "Ixa Hub",
 		Welcome = "Welcome back,",
-		Tier = "v1",
+		Tier = "v2",
 		Stats = { "Players", "Session", "FPS", "Ping", "Game", "Executor" },
 	},
 })
@@ -4266,7 +4266,371 @@ for name in pairs(enemyNames) do table.insert(sortedEnemies, name) end
 table.sort(sortedEnemies, function(a, b) return string.lower(a) < string.lower(b) end)
 for _, name in ipairs(sortedEnemies) do session.AddEnemyOption(name) end
 
+local Promo = {invite = "https://discord.gg/BpfKcTbap2", generation = 0, token = 0, feedback = 0, failures = 0, started = false, timers = {}, connections = {}}
+
+function Promo.after(seconds, callback)
+    local generation = Promo.generation
+    local thread
+    thread = task.delay(seconds, function()
+        if thread then Promo.timers[thread] = nil end
+        if not session.Active or generation ~= Promo.generation then return end
+        local ok, message = pcall(callback)
+        if not ok then warn("[Ixa Hub] Discord banner: " .. tostring(message)) end
+    end)
+    if thread then Promo.timers[thread] = true end
+    return thread
+end
+
+function Promo.disconnect()
+    for _, connection in ipairs(Promo.connections) do
+        pcall(function() connection:Disconnect() end)
+    end
+    table.clear(Promo.connections)
+end
+
+function Promo.connect(signal, callback)
+    local connection = signal:Connect(callback)
+    table.insert(Promo.connections, connection)
+end
+
+function Promo.holder()
+    if Promo.gui and Promo.gui.Parent then return Promo.gui end
+    if Promo.gui then pcall(function() Promo.gui:Destroy() end) end
+    Promo.gui = nil
+    local windowGui = Window and Window.Gui
+    local parents = {}
+    if windowGui and windowGui.Parent then table.insert(parents, windowGui.Parent) end
+    local okCore, coreGui = pcall(function() return game:GetService("CoreGui") end)
+    if okCore and coreGui then table.insert(parents, coreGui) end
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if playerGui then table.insert(parents, playerGui) end
+    for _, parent in ipairs(parents) do
+        local ok, children = pcall(function() return parent:GetChildren() end)
+        if ok and type(children) == "table" then
+            for _, child in ipairs(children) do
+                if child:IsA("ScreenGui") and child.Name == "IxaHubDiscordPromo" then
+                    pcall(function() child:Destroy() end)
+                end
+            end
+        end
+    end
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "IxaHubDiscordPromo"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = true
+    local okDisplay, displayOrder = pcall(function() return (windowGui and windowGui.DisplayOrder or 10001) + 1 end)
+    gui.DisplayOrder = okDisplay and displayOrder or 100001
+    gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+    for _, parent in ipairs(parents) do
+        pcall(function() gui.Parent = parent end)
+        if gui.Parent then break end
+    end
+    if not gui.Parent then
+        pcall(function() gui:Destroy() end)
+        return nil
+    end
+    Promo.gui = gui
+    return gui
+end
+
+function Promo.copy()
+    local function tryCopy(fn)
+        if type(fn) ~= "function" then return false end
+        local ok, result = pcall(fn, Promo.invite)
+        return ok and result ~= false
+    end
+    if tryCopy(setclipboard) then return true end
+    if toclipboard ~= setclipboard and tryCopy(toclipboard) then return true end
+    local synCopy = type(syn) == "table" and syn.setclipboard or nil
+    if synCopy ~= setclipboard and synCopy ~= toclipboard and tryCopy(synCopy) then return true end
+    return false
+end
+
+function Promo.refresh()
+    local parts = Promo.parts
+    if not parts or not Promo.frame or not Promo.frame.Parent then return end
+    if Promo.copied then
+        parts.copy.Text = "Done"
+        parts.hint.Text = "Link copied: " .. Promo.invite
+        parts.hint.TextColor3 = Color3.fromRGB(170, 226, 178)
+    elseif Promo.copyFailed then
+        parts.copy.Text = "Copy"
+        parts.hint.Text = "Copy it manually: " .. Promo.invite
+        parts.hint.TextColor3 = Color3.fromRGB(232, 200, 140)
+    else
+        parts.copy.Text = "Copy"
+        parts.hint.Text = "Updates, scripts and support live there"
+        parts.hint.TextColor3 = Color3.fromRGB(170, 162, 175)
+    end
+end
+
+function Promo.animate(instance, duration, style, direction, properties)
+    pcall(function()
+        local tween = game:GetService("TweenService"):Create(instance, TweenInfo.new(duration, style, direction), properties)
+        tween:Play()
+    end)
+end
+
+function Promo.hide(animate, expected)
+    if expected and expected ~= Promo.token then return end
+    local toast, parts = Promo.frame, Promo.parts
+    if not toast then return end
+    Promo.token += 1
+    Promo.frame, Promo.parts = nil, nil
+    Promo.disconnect()
+    if animate and toast.Parent then
+        if parts and parts.scale then
+            Promo.animate(parts.scale, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In, {Scale = 0.9})
+        end
+        Promo.animate(toast, 0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.In, {
+            BackgroundTransparency = 1,
+            Position = UDim2.new(0.5, 0, 0, -6),
+        })
+        Promo.after(0.24, function()
+            pcall(function() if toast.Parent then toast:Destroy() end end)
+        end)
+    else
+        pcall(function() toast:Destroy() end)
+    end
+end
+
+function Promo.build(gui)
+    local toast = Instance.new("Frame")
+    Promo.frame = toast
+    toast.Name = "DiscordPromo"
+    toast.AnchorPoint = Vector2.new(0.5, 0)
+    toast.Position = UDim2.new(0.5, 0, 0, 14)
+    toast.Size = UDim2.new(1, -24, 0, 0)
+    toast.AutomaticSize = Enum.AutomaticSize.Y
+    toast.BackgroundColor3 = Color3.fromRGB(27, 21, 30)
+    toast.BackgroundTransparency = 0.04
+    toast.BorderSizePixel = 0
+    toast.ZIndex = 100
+    toast.Parent = gui
+    local constraint = Instance.new("UISizeConstraint")
+    constraint.MaxSize = Vector2.new(382, 1000)
+    constraint.Parent = toast
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 12)
+    corner.Parent = toast
+    local scale = Instance.new("UIScale")
+    scale.Scale = 0.95
+    scale.Parent = toast
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = Color3.fromRGB(232, 164, 205)
+    stroke.Thickness = 1
+    stroke.Transparency = 0.5
+    stroke.Parent = toast
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 12)
+    padding.PaddingBottom = UDim.new(0, 12)
+    padding.PaddingLeft = UDim.new(0, 14)
+    padding.PaddingRight = UDim.new(0, 14)
+    padding.Parent = toast
+    local list = Instance.new("UIListLayout")
+    list.FillDirection = Enum.FillDirection.Vertical
+    list.HorizontalAlignment = Enum.HorizontalAlignment.Left
+    list.SortOrder = Enum.SortOrder.LayoutOrder
+    list.Padding = UDim.new(0, 8)
+    list.Parent = toast
+    local header = Instance.new("Frame")
+    header.Name = "Header"
+    header.BackgroundTransparency = 1
+    header.Size = UDim2.new(1, 0, 0, 22)
+    header.LayoutOrder = 1
+    header.Parent = toast
+    local badge = Instance.new("TextLabel")
+    badge.Name = "Badge"
+    badge.AnchorPoint = Vector2.new(0, 0.5)
+    badge.Position = UDim2.new(0, 0, 0.5, 0)
+    badge.Size = UDim2.fromOffset(62, 18)
+    badge.BackgroundColor3 = Color3.fromRGB(232, 164, 205)
+    badge.BackgroundTransparency = 0.82
+    badge.Font = Enum.Font.GothamBold
+    badge.TextSize = 9
+    badge.TextColor3 = Color3.fromRGB(246, 218, 234)
+    badge.Text = "DISCORD"
+    badge.Parent = header
+    local badgeCorner = Instance.new("UICorner")
+    badgeCorner.CornerRadius = UDim.new(0, 5)
+    badgeCorner.Parent = badge
+    local title = Instance.new("TextLabel")
+    title.Name = "Title"
+    title.BackgroundTransparency = 1
+    title.Position = UDim2.fromOffset(72, 0)
+    title.Size = UDim2.new(1, -98, 1, 0)
+    title.Font = Enum.Font.GothamBold
+    title.TextSize = 14
+    title.TextXAlignment = Enum.TextXAlignment.Left
+    title.TextYAlignment = Enum.TextYAlignment.Center
+    title.TextColor3 = Color3.fromRGB(242, 236, 244)
+    title.TextTruncate = Enum.TextTruncate.AtEnd
+    title.Text = "Subscribe to our Discord"
+    title.Parent = header
+    local close = Instance.new("TextButton")
+    close.Name = "Close"
+    close.AnchorPoint = Vector2.new(1, 0.5)
+    close.Position = UDim2.new(1, 0, 0.5, 0)
+    close.Size = UDim2.fromOffset(20, 20)
+    close.BackgroundTransparency = 1
+    close.Font = Enum.Font.GothamBold
+    close.TextSize = 17
+    close.TextColor3 = Color3.fromRGB(150, 140, 152)
+    close.Text = "\u{d7}"
+    close.AutoButtonColor = false
+    close.ZIndex = 101
+    close.Parent = header
+    local hint = Instance.new("TextLabel")
+    hint.Name = "Hint"
+    hint.BackgroundTransparency = 1
+    hint.Size = UDim2.new(1, 0, 0, 16)
+    hint.Font = Enum.Font.Gotham
+    hint.TextSize = 12
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextColor3 = Color3.fromRGB(170, 162, 175)
+    hint.TextTruncate = Enum.TextTruncate.AtEnd
+    hint.Text = "Updates, scripts and support live there"
+    hint.LayoutOrder = 2
+    hint.Parent = toast
+    local row = Instance.new("Frame")
+    row.Name = "Actions"
+    row.BackgroundTransparency = 1
+    row.Size = UDim2.new(1, 0, 0, 32)
+    row.LayoutOrder = 3
+    row.Parent = toast
+    local link = Instance.new("TextButton")
+    link.Name = "Invite"
+    link.Size = UDim2.new(1, -88, 1, 0)
+    link.BackgroundColor3 = Color3.fromRGB(43, 33, 45)
+    link.BackgroundTransparency = 0.15
+    link.AutoButtonColor = false
+    link.Font = Enum.Font.GothamMedium
+    link.TextSize = 12
+    link.TextColor3 = Color3.fromRGB(232, 180, 210)
+    link.TextXAlignment = Enum.TextXAlignment.Left
+    link.TextYAlignment = Enum.TextYAlignment.Center
+    link.TextTruncate = Enum.TextTruncate.AtEnd
+    link.Text = Promo.invite
+    link.ClipsDescendants = true
+    link.Parent = row
+    local linkPadding = Instance.new("UIPadding")
+    linkPadding.PaddingLeft = UDim.new(0, 10)
+    linkPadding.PaddingRight = UDim.new(0, 10)
+    linkPadding.Parent = link
+    local linkCorner = Instance.new("UICorner")
+    linkCorner.CornerRadius = UDim.new(0, 8)
+    linkCorner.Parent = link
+    local copy = Instance.new("TextButton")
+    copy.Name = "Copy"
+    copy.AnchorPoint = Vector2.new(1, 0)
+    copy.Position = UDim2.new(1, 0, 0, 0)
+    copy.Size = UDim2.fromOffset(80, 32)
+    copy.BackgroundColor3 = Color3.fromRGB(232, 164, 205)
+    copy.AutoButtonColor = false
+    copy.Font = Enum.Font.GothamBold
+    copy.TextSize = 12
+    copy.TextColor3 = Color3.fromRGB(32, 24, 32)
+    copy.Text = "Copy"
+    copy.Parent = row
+    local copyCorner = Instance.new("UICorner")
+    copyCorner.CornerRadius = UDim.new(0, 8)
+    copyCorner.Parent = copy
+    return toast, {scale = scale, title = title, hint = hint, link = link, copy = copy, close = close}
+end
+
+function Promo.show()
+    if not session.Active then return false end
+    local gui = Promo.holder()
+    if not gui then return false end
+    if Promo.frame then Promo.hide(false) end
+    Promo.token += 1
+    local token = Promo.token
+    Promo.copied, Promo.copyFailed = false, false
+    local toast, parts = Promo.build(gui)
+    Promo.frame, Promo.parts = toast, parts
+    local function handleCopy()
+        if Promo.token ~= token or not toast.Parent then return end
+        Promo.copied = Promo.copy()
+        Promo.copyFailed = not Promo.copied
+        Promo.feedback = Promo.feedback + 1
+        local feedback = Promo.feedback
+        Promo.refresh()
+        Promo.after(Promo.copied and 2.5 or 3, function()
+            if Promo.token ~= token or Promo.feedback ~= feedback or not toast.Parent then return end
+            Promo.copied, Promo.copyFailed = false, false
+            Promo.refresh()
+        end)
+    end
+    Promo.connect(parts.copy.Activated, handleCopy)
+    Promo.connect(parts.link.Activated, handleCopy)
+    Promo.connect(parts.close.Activated, function() Promo.hide(true, token) end)
+    Promo.connect(parts.copy.MouseEnter, function()
+        parts.copy.BackgroundColor3 = Color3.fromRGB(246, 190, 222)
+    end)
+    Promo.connect(parts.copy.MouseLeave, function()
+        parts.copy.BackgroundColor3 = Color3.fromRGB(232, 164, 205)
+    end)
+    Promo.connect(parts.link.MouseEnter, function()
+        parts.link.BackgroundTransparency = 0.02
+    end)
+    Promo.connect(parts.link.MouseLeave, function()
+        parts.link.BackgroundTransparency = 0.15
+    end)
+    Promo.animate(parts.scale, 0.28, Enum.EasingStyle.Quint, Enum.EasingDirection.Out, {Scale = 1})
+    Promo.after(25, function() Promo.hide(true, token) end)
+    return true
+end
+
+function Promo.tick()
+    if not session.Active then return end
+    local ok, shown = pcall(Promo.show)
+    if ok and shown then
+        Promo.failures, Promo.errorShown = 0, false
+        Promo.after(1800, Promo.tick)
+        return
+    end
+    if not ok then
+        Promo.hide(false)
+        if not Promo.errorShown then
+            Promo.errorShown = true
+            warn("[Ixa Hub] Discord banner: " .. tostring(shown))
+        end
+    end
+    Promo.failures += 1
+    Promo.after(math.min(60, 2 * 2 ^ math.min(Promo.failures - 1, 5)), Promo.tick)
+end
+
+function Promo.start()
+    if not session.Active or Promo.started then return end
+    Promo.started = true
+    Promo.after(6, Promo.tick)
+end
+
+function Promo.stop()
+    Promo.generation += 1
+    Promo.token += 1
+    Promo.started = false
+    Promo.disconnect()
+    if type(task.cancel) == "function" then
+        for thread in pairs(Promo.timers) do pcall(task.cancel, thread) end
+    end
+    table.clear(Promo.timers)
+    if Promo.gui then pcall(function() Promo.gui:Destroy() end) end
+    Promo.gui, Promo.frame, Promo.parts = nil, nil, nil
+end
+
+SettingsMain:Label({Name = "Discord: discord.gg/BpfKcTbap2"})
+SettingsMain:Button({Name = "Copy Discord Invite", Callback = function()
+    if Promo.copy() then
+        session.Notify("Copied " .. Promo.invite)
+    else
+        session.Notify("Discord: " .. Promo.invite)
+    end
+end})
+SettingsMain:Button({Name = "Show Discord Banner", Callback = function() pcall(Promo.show) end})
 SettingsMain:Button({Name = "Unload Ixa Hub", Callback = function() session:Unload() end})
+pcall(Promo.start)
+session.Notify("Discord: " .. Promo.invite)
 SettingsPage:CreateConfigManager({Name = "Configs", Side = "Left"})
 SettingsPage:CreateThemeManager({Name = "Theme", Side = "Right"})
 if Window.LoadAutoload then
@@ -4350,6 +4714,7 @@ function session:Unload()
     restoreLocalProtection()
     setFullbright(false)
     clearMarkers()
+    pcall(Promo.stop)
     if self.HookRecord and self.HookRecord.Owner == self then self.HookRecord.Owner = nil end
     for _, connection in ipairs(self.Connections) do pcall(function() connection:Disconnect() end) end
     table.clear(self.Connections)
