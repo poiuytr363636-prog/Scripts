@@ -1,4 +1,3 @@
--- Hey bro, if you see an open script, then why? Yeah, I just don't like Roblox anymore. You can take the script, but please, can you mention me somewhere @Poiuytr, my main Discord account @poiytr12345678. Good luck bro!
 local function buildIxaLibrary()
 local __Ixa_iconsLicense = [=[MIT License
 
@@ -21548,7 +21547,7 @@ local Promo = {invite = "https://discord.gg/BpfKcTbap2", generation = 0, token =
 local Guard = {groups = {}}
 local Save = {path = "HALLOWED_REACTOR_Hub.json", writable = false, status = "Settings: unavailable", revision = 0}
 local Motion = {character = nil, humanoid = nil, root = nil, parts = {}, characterConnections = {}}
-local Combat = {tool = nil, module = nil, settings = nil, pending = false, request = 0, patches = {}, state = "Weapon: waiting"}
+local Combat = {tool = nil, module = nil, settings = nil, serverConfig = nil, pending = false, request = 0, patches = {}, state = "Weapon: waiting", fireRef = nil, recoilRef = nil, spreadRef = nil}
 local Silent = {hooks = {}, records = {}, generation = 0, scanCount = 0, nextAttempt = 0, nextTargetScan = 0}
 local Auto = {held = false, focused = true, shots = 0, toolFailures = 0, mouseFailures = 0, nextPress = 0, nextCheck = 0, pending = setmetatable({}, {__mode = "k"}), autoShots = 0, dryCycles = 0}
 local Input = {}
@@ -21566,6 +21565,8 @@ local Reload = {
 local Punch = {nextCheck = 0, nextAttempt = 0}
 local Visual = {characters = {}, pickups = {}, objectives = {}, accumulator = 0}
 local World = {shownPrompts = {}}
+local Quest = {next = 0, scanAt = 0, prompts = {}, target = nil, lastAction = 0}
+local AUTO_QUEST_TEMP_DISABLED = true
 
 local Optimizer = {
     mode = 0,
@@ -21588,7 +21589,8 @@ local Optimizer = {
 
 function Optimizer.write(group, object, property, desired)
     local ok, current = pcall(function() return object[property] end)
-    if not ok or current == nil or current == desired then return end
+    if not ok or current == nil then return false end
+    if current == desired then return true end
     local record = group[object]
     if record then
         record.original = current
@@ -21596,7 +21598,11 @@ function Optimizer.write(group, object, property, desired)
         record = {property = property, original = current, desired = desired}
     end
     local changed = pcall(function() object[property] = desired end)
-    if changed then group[object] = record end
+    if changed then
+        group[object] = record
+        return true
+    end
+    return false
 end
 
 function Optimizer.track(list, index, object)
@@ -21611,9 +21617,11 @@ function Optimizer.untrack(list, index, object)
     if not position then return end
     local lastPosition = #list
     local last = list[lastPosition]
-    list[position] = last
+    if position < lastPosition then
+        list[position] = last
+        index[last] = position
+    end
     list[lastPosition] = nil
-    index[last] = position
     index[object] = nil
 end
 
@@ -21639,6 +21647,30 @@ function Optimizer.restoreObject(group, object)
     end)
 end
 
+function Optimizer.isProtected(object)
+    local character = LocalPlayer.Character
+    if character and (object == character or object:IsDescendantOf(character)) then
+        return true
+    end
+    local camera = Workspace.CurrentCamera
+    if camera and (object == camera or object:IsDescendantOf(camera)) then
+        return true
+    end
+    return false
+end
+
+function Optimizer.effectClass(object)
+    return object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam") or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") or object:IsA("PostEffect")
+end
+
+function Optimizer.removableClass(object)
+    return Optimizer.effectClass(object) or object:IsA("Decal") or object:IsA("Texture") or object:IsA("SurfaceAppearance") or object:IsA("Light") or object:IsA("Clouds") or object:IsA("Atmosphere") or object:IsA("Highlight")
+end
+
+function Optimizer.removable(object)
+    return not Optimizer.isProtected(object) and Optimizer.removableClass(object)
+end
+
 function Optimizer.enqueue(object)
     if not object or Optimizer.seen[object] then return end
     Optimizer.seen[object] = true
@@ -21658,7 +21690,9 @@ function Optimizer.connected()
     if #Optimizer.connections > 0 then return end
     for _, root in ipairs({Workspace, Lighting}) do
         table.insert(Optimizer.connections, root.DescendantAdded:Connect(function(object)
-            if Optimizer.mode > 0 then Optimizer.enqueue(object) end
+            if Optimizer.mode > 0 and (Optimizer.removableClass(object) or object:IsA("Folder") or object:IsA("Model")) then
+                Optimizer.enqueue(object)
+            end
         end))
         table.insert(Optimizer.connections, root.DescendantRemoving:Connect(function(object)
             Optimizer.seen[object] = nil
@@ -21678,6 +21712,7 @@ function Optimizer.disconnect()
 end
 
 function Optimizer.setMode(mode)
+    mode = mode == 2 and 2 or mode == 1 and 1 or 0
     if mode == Optimizer.mode then return end
     local old = Optimizer.mode
     Optimizer.mode = mode
@@ -21701,45 +21736,34 @@ function Optimizer.setMode(mode)
 end
 
 function Optimizer.apply(object)
-    if Optimizer.mode <= 0 then return end
-    if object:IsA("ParticleEmitter") or object:IsA("Trail") or object:IsA("Beam") or object:IsA("Smoke") or object:IsA("Fire") or object:IsA("Sparkles") or object:IsA("PostEffect") then
+    if Optimizer.mode <= 0 then return false end
+    if Optimizer.mode >= 2 and Optimizer.removable(object) then
+        local removed = pcall(function() object:Destroy() end)
+        if removed then return true end
+    end
+    if Optimizer.effectClass(object) and not Optimizer.isProtected(object) then
         Optimizer.track(Optimizer.normalWatch, Optimizer.normalIndex, object)
         Optimizer.write(Optimizer.normal, object, "Enabled", false)
     end
-    if Optimizer.mode >= 2 then
-        if object:IsA("Decal") or object:IsA("Texture") then
-            Optimizer.track(Optimizer.superWatch, Optimizer.superIndex, object)
-            Optimizer.write(Optimizer.super, object, "Transparency", 1)
-        elseif object:IsA("Light") or object:IsA("Clouds") then
-            Optimizer.track(Optimizer.superWatch, Optimizer.superIndex, object)
-            Optimizer.write(Optimizer.super, object, "Enabled", false)
-        end
-    end
+    return false
 end
 
 function Optimizer.maintain()
-    local function refresh(list, cursorName, group, superMode)
-        local count = math.min(80, #list)
-        local cursor = Optimizer[cursorName]
-        for _ = 1, count do
-            if cursor > #list then cursor = 1 end
-            local object = list[cursor]
-            if not object then break end
-            if superMode and (object:IsA("Decal") or object:IsA("Texture")) then
-                Optimizer.write(group, object, "Transparency", 1)
-            else
-                Optimizer.write(group, object, "Enabled", false)
-            end
-            cursor += 1
+    if Optimizer.mode ~= 1 then return end
+    local count = math.min(16, #Optimizer.normalWatch)
+    local cursor = Optimizer.normalCursor
+    for _ = 1, count do
+        if cursor > #Optimizer.normalWatch then cursor = 1 end
+        local object = Optimizer.normalWatch[cursor]
+        if not object then break end
+        if object.Parent and not Optimizer.isProtected(object) and Optimizer.effectClass(object) then
+            Optimizer.write(Optimizer.normal, object, "Enabled", false)
+        else
+            Optimizer.untrack(Optimizer.normalWatch, Optimizer.normalIndex, object)
         end
-        Optimizer[cursorName] = cursor
+        cursor += 1
     end
-    if Optimizer.mode > 0 then
-        refresh(Optimizer.normalWatch, "normalCursor", Optimizer.normal, false)
-    end
-    if Optimizer.mode >= 2 then
-        refresh(Optimizer.superWatch, "superCursor", Optimizer.super, true)
-    end
+    Optimizer.normalCursor = cursor
 end
 
 function Optimizer.restoreBatch(group, limit)
@@ -21754,10 +21778,10 @@ function Optimizer.restoreBatch(group, limit)
 end
 
 function Optimizer.step()
-    if Optimizer.restoreSuper and Optimizer.restoreBatch(Optimizer.super, 160) then
+    if Optimizer.restoreSuper and Optimizer.restoreBatch(Optimizer.super, 120) then
         Optimizer.restoreSuper = false
     end
-    if Optimizer.restoreNormal and Optimizer.restoreBatch(Optimizer.normal, 160) then
+    if Optimizer.restoreNormal and Optimizer.restoreBatch(Optimizer.normal, 120) then
         Optimizer.restoreNormal = false
     end
     if Optimizer.mode <= 0 then
@@ -21767,17 +21791,20 @@ function Optimizer.step()
         return
     end
     local processed = 0
-    while processed < 200 and Optimizer.head <= Optimizer.tail do
+    local deadline = os.clock() + (Optimizer.mode >= 2 and 0.0015 or 0.001)
+    while processed < 80 and Optimizer.head <= Optimizer.tail and os.clock() < deadline do
         local object = Optimizer.queue[Optimizer.head]
         Optimizer.queue[Optimizer.head] = nil
         Optimizer.head += 1
         processed += 1
         if object and (object == Workspace or object == Lighting or object:IsDescendantOf(Workspace) or object:IsDescendantOf(Lighting)) then
-            Optimizer.apply(object)
-            local ok, children = pcall(function() return object:GetChildren() end)
-            if ok then
-                for _, child in ipairs(children) do
-                    Optimizer.enqueue(child)
+            local removed = Optimizer.apply(object)
+            if not removed then
+                local ok, children = pcall(function() return object:GetChildren() end)
+                if ok then
+                    for _, child in ipairs(children) do
+                        Optimizer.enqueue(child)
+                    end
                 end
             end
         end
@@ -21803,8 +21830,8 @@ end
 function Optimizer.status()
     if Optimizer.restoreNormal or Optimizer.restoreSuper then return "FPS optimization: restoring visuals" end
     if Optimizer.mode == 0 then return "FPS optimization: off" end
-    if Optimizer.head <= Optimizer.tail then return "FPS optimization: applying in batches" end
-    return Optimizer.mode == 2 and "FPS optimization: super" or "FPS optimization: normal"
+    if Optimizer.head <= Optimizer.tail then return Optimizer.mode == 2 and "FPS optimization: removing extras" or "FPS optimization: applying lightly" end
+    return Optimizer.mode == 2 and "FPS optimization: extras removed" or "FPS optimization: normal"
 end
 
 local defaults = {
@@ -21820,6 +21847,7 @@ local defaults = {
     felsiReload = 100,
     squadReload = 200,
     noRecoil = false,
+    noSpread = false,
     silentAim = false,
     autoFire = false,
     autoReload = false,
@@ -21827,21 +21855,16 @@ local defaults = {
     autoPunch = false,
     punchRange = 8,
     punchKey = "G",
-    targetPart = "Body",
-    wallCheck = true,
-    aimMode = "360",
-    aimRadius = 200,
+    shieldPenetration = true,
+    aimMode = "Camera",
+    aimRadius = 35,
     showAimFov = false,
     aimColor = 0xFF9EC8,
     espPlayers = false,
     espAllies = false,
     espNPC = false,
-    mobBoxes = false,
-    mobSkeletons = false,
     mobColor = 0xFFAF58,
     espBoss = false,
-    bossBoxes = false,
-    bossSkeletons = false,
     bossColor = 0xFF6464,
     espObjectives = false,
     espPickups = false,
@@ -21856,13 +21879,14 @@ local defaults = {
     crosshair = false,
     fps = false,
     instantPrompt = false,
+    autoQuest = false,
 }
 local numeric = {
     speed = {12, 100},
     felsiReload = {60, 100},
     squadReload = {100, 200},
     punchRange = {2, 20},
-    aimRadius = {20, 1000},
+    aimRadius = {5, 120},
     aimColor = {0, 16777215},
     mobColor = {0, 16777215},
     bossColor = {0, 16777215},
@@ -21871,8 +21895,7 @@ local numeric = {
     fov = {40, 120},
 }
 local choices = {
-    aimMode = {"360", "Screen"},
-    targetPart = {"Body", "Head", "Torso", "Root"},
+    aimMode = {"360", "Camera"},
     reloadKey = {"R", "F", "T", "Y", "U", "X", "Z", "C", "V"},
     punchKey = {"G", "F", "T", "Y", "U", "X", "Z", "C", "V"},
 }
@@ -21925,11 +21948,6 @@ function Save.load()
                 local loaded = table.clone(defaults)
                 for key, default in pairs(defaults) do
                     local value = data.values[key]
-                    if key == "targetPart" and value == nil then
-                        local old = data.values.silentHead
-                        if type(old) ~= "boolean" then old = data.values.aimHead end
-                        if type(old) == "boolean" then value = old and "Head" or "Body" end
-                    end
                     if value ~= nil then
                         local clean = App.validValue(key, value)
                         if clean == nil then
@@ -21974,11 +21992,6 @@ function Save.load()
     local loaded = table.clone(defaults)
     for key, default in pairs(defaults) do
         local value = data.values[key]
-        if key == "targetPart" and value == nil then
-            local old = data.values.silentHead
-            if type(old) ~= "boolean" then old = data.values.aimHead end
-            if type(old) == "boolean" then value = old and "Head" or "Body" end
-        end
         if value ~= nil then
             local clean = App.validValue(key, value)
             if clean == nil then
@@ -22029,6 +22042,7 @@ function Save.schedule()
 end
 
 Save.load()
+settings.autoQuest = false
 for key in pairs(startupManual) do settings[key] = false end
 
 function Guard.read(record)
@@ -22356,6 +22370,19 @@ function App.notice(text)
     end
 end
 
+function UI.cameraAimPixels()
+    local camera = Workspace.CurrentCamera
+    if not camera then return 2 end
+    local viewport = camera.ViewportSize
+    local cameraFov = math.clamp(tonumber(camera.FieldOfView) or 70, 1, 179)
+    local aimFov = math.clamp(tonumber(settings.aimRadius) or 35, 1, 179)
+    local cameraHalf = math.tan(math.rad(cameraFov * 0.5))
+    local aimHalf = math.tan(math.rad(aimFov * 0.5))
+    if cameraHalf <= 0 or aimHalf ~= aimHalf then return 2 end
+    local radius = viewport.Y * 0.5 * aimHalf / cameraHalf
+    return math.clamp(radius * 2, 2, math.max(viewport.X, viewport.Y) * 4)
+end
+
 function UI.refreshOverlays()
     UI.crosshair.Visible = settings.crosshair and not UI.open
     UI.fpsLabel.Visible = settings.fps
@@ -22363,8 +22390,8 @@ function UI.refreshOverlays()
     UI.eventLabel.Visible = settings.eventTracker
     UI.threatLabel.Visible = settings.threatTracker
     UI.threatLabel.Position = UDim2.fromOffset(0, settings.eventTracker and 26 or 0)
-    UI.aimCircle.Visible = settings.showAimFov and settings.aimMode == "Screen" and not UI.open
-    UI.aimCircle.Size = UDim2.fromOffset(settings.aimRadius * 2, settings.aimRadius * 2)
+    UI.aimCircle.Visible = settings.showAimFov and settings.aimMode ~= "360" and not UI.open
+    UI.aimCircle.Size = UDim2.fromOffset(UI.cameraAimPixels(), UI.cameraAimPixels())
     UI.aimStroke.Color = UI.color(settings.aimColor)
 end
 
@@ -22620,6 +22647,36 @@ function Combat.ownedValue(patch, current)
     return true
 end
 
+function Combat.cloneConfig(config)
+    if type(config) ~= "table" then
+        return config
+    end
+    local copy = table.clone(config)
+    local fire = config.fire
+    if type(fire) == "table" then
+        copy.fire = table.clone(fire)
+        for _, key in ipairs({"recoil", "spread"}) do
+            local ranges = fire[key]
+            if type(ranges) == "table" then
+                copy.fire[key] = table.clone(ranges)
+                for _, axis in ipairs({"x", "y", "z"}) do
+                    if type(ranges[axis]) == "table" then
+                        copy.fire[key][axis] = table.clone(ranges[axis])
+                    end
+                end
+            end
+        end
+    end
+    return copy
+end
+
+function Combat.serverPayload(tool, config)
+    if tool == Combat.tool and config == Combat.settings and Combat.serverConfig then
+        return Combat.serverConfig
+    end
+    return config
+end
+
 function Combat.restorePatches()
     for index = #Combat.patches, 1, -1 do
         local patch = Combat.patches[index]
@@ -22633,8 +22690,10 @@ function Combat.restorePatches()
         end
     end
     table.clear(Combat.patches)
+    Combat.serverConfig = nil
     Combat.fireRef = nil
     Combat.recoilRef = nil
+    Combat.spreadRef = nil
 end
 
 function Combat.patch(target, key, value, zeroRange)
@@ -22659,7 +22718,7 @@ function Combat.patch(target, key, value, zeroRange)
 end
 
 function Combat.needsConfig()
-    return settings.noRecoil
+    return settings.noRecoil or settings.noSpread
 end
 
 function Combat.hooksWanted()
@@ -22677,15 +22736,20 @@ function Combat.applyPatches()
         return
     end
     local fire = config.fire
+    Combat.serverConfig = Combat.cloneConfig(config)
     Combat.fireRef = fire
     Combat.recoilRef = fire.recoil
+    Combat.spreadRef = fire.spread
     local attempted, successful = 0, 0
-    if settings.noRecoil and type(fire.recoil) == "table" then
+    local function patchRanges(ranges, enabled)
+        if not enabled or type(ranges) ~= "table" then
+            return
+        end
         for _, axis in ipairs({"x", "y", "z"}) do
-            local range = fire.recoil[axis]
+            local range = ranges[axis]
             if type(range) == "table" and type(range[1]) == "number" and type(range[2]) == "number" then
                 attempted += 1
-                if Combat.patch(fire.recoil, axis, {0, 0}, true) then
+                if Combat.patch(ranges, axis, {0, 0}, true) then
                     successful += 1
                 else
                     local low = Combat.patch(range, 1, 0)
@@ -22697,14 +22761,27 @@ function Combat.applyPatches()
             end
         end
     end
+    patchRanges(fire.recoil, settings.noRecoil)
+    patchRanges(fire.spread, settings.noSpread)
     if Combat.needsConfig() and attempted == 0 then
-        Combat.state = "Weapon: no supported local fields found"
+        Combat.state = "Weapon: no recoil/spread fields found"
     elseif successful < attempted then
-        Combat.state = "Weapon: some local fields are protected"
+        Combat.state = "Weapon: some recoil/spread fields are protected"
     elseif Combat.source == "live" then
-        Combat.state = "Weapon: active client configuration linked; server limits unknown"
+        Combat.state = "Weapon: no recoil/spread active; original server payload preserved"
     else
-        Combat.state = "Weapon: local configuration unverified; fire or reload to confirm"
+        Combat.state = "Weapon: local recoil/spread patch ready; server payload preserved"
+    end
+    if type(Silent.installTable) == "function" then
+        local assets = ReplicatedStorage:FindFirstChild("Assets")
+        local modules = assets and assets:FindFirstChild("Modules")
+        local networkModule = modules and modules:FindFirstChild("Network")
+        if networkModule and networkModule:IsA("ModuleScript") then
+            local ok, network = pcall(require, networkModule)
+            if ok and type(network) == "table" then
+                Silent.installTable(network, "network")
+            end
+        end
     end
 end
 
@@ -22714,6 +22791,9 @@ function Combat.patchesValid()
         return false
     end
     if settings.noRecoil and config.fire.recoil ~= Combat.recoilRef then
+        return false
+    end
+    if settings.noSpread and config.fire.spread ~= Combat.spreadRef then
         return false
     end
     for _, patch in ipairs(Combat.patches) do
@@ -23113,6 +23193,239 @@ function World.returnPosition()
     return false
 end
 
+function World.questAnchor()
+    local carryState = tostring(LocalPlayer:GetAttribute("CarryQuestState") or "")
+    local carry = Workspace:FindFirstChild("CarryQuest")
+    if carryState == "Carrying" or carryState == "Dropping" or carryState == "Delivering" then
+        local frame = carry and carry:GetAttribute("CarryQuestDeliveryZoneCFrame")
+        if typeof(frame) == "CFrame" and World.validPosition(frame.Position) then
+            return frame.Position, "carry:delivery"
+        end
+        local zone = carry and carry:FindFirstChild("DeliveryZone")
+        local zonePosition = World.position(zone)
+        if World.validPosition(zonePosition) then
+            return zonePosition, "carry:delivery"
+        end
+    elseif carryState == "Available" or carryState == "Dropped" then
+        local active = carry and carry:FindFirstChild("ActiveNPCs")
+        if active then
+            for _, child in ipairs(active:GetChildren()) do
+                if child:IsA("Model") and child:GetAttribute("OwnerUserId") == LocalPlayer.UserId and child:GetAttribute("CarryQuestDelivered") ~= true then
+                    local position = World.position(child)
+                    if World.validPosition(position) then
+                        return position, "carry:pickup"
+                    end
+                end
+            end
+        end
+    end
+    local antonioState = tostring(LocalPlayer:GetAttribute("AntonioQuestState") or "")
+    if antonioState == "Ready" then
+        local position = LocalPlayer:GetAttribute("AntonioQuestMarkerPosition")
+        if World.validPosition(position) then
+            return position, "antonio:return"
+        end
+    elseif antonioState == "Active" then
+        for _, item in ipairs({"Spoon", "Compass", "Wrench", "AntBarrel1", "AntBarrel2", "AntBarrel3"}) do
+            local position = LocalPlayer:GetAttribute("AntonioQuestItemPosition_" .. item)
+            if World.validPosition(position) then
+                return position, "antonio:" .. item
+            end
+        end
+    end
+    local manhattan = Workspace:FindFirstChild("ManhattanRadiationQuest")
+    local activeItems = manhattan and manhattan:FindFirstChild("ActiveItems")
+    if activeItems then
+        for _, item in ipairs(activeItems:GetChildren()) do
+            if item.Name ~= "_DebugVisibleItems" and item:GetAttribute("DebugItem") ~= true and item:GetAttribute("OwnerUserId") == LocalPlayer.UserId then
+                local position = World.position(item)
+                if World.validPosition(position) then
+                    return position, "manhattan:item"
+                end
+            end
+        end
+    end
+    local yuriState = tostring(LocalPlayer:GetAttribute("YuriNVGQuestState") or "")
+    if yuriState ~= "" and yuriState ~= "Inactive" and yuriState ~= "Completed" then
+        for _, attributeName in ipairs({"YuriNVGMarkerPosition", "YuriNVGOnboardingMarker", "YuriQuestTargetPosition", "YuriQuestMarkerPosition"}) do
+            local position = LocalPlayer:GetAttribute(attributeName)
+            if typeof(position) == "CFrame" then position = position.Position end
+            if World.validPosition(position) then
+                return position, "yuri:" .. attributeName
+            end
+        end
+    end
+    local carlosState = tostring(LocalPlayer:GetAttribute("CarlosQuestState") or "")
+    if carlosState == "ReadyToTurnIn" or carlosState == "CompletedPendingBadge" then
+        for _, attributeName in ipairs({"CarlosQuestMarkerPosition", "CarlosQuestReturnPosition", "MinimapObjectiveCarlosPosition"}) do
+            local position = LocalPlayer:GetAttribute(attributeName)
+            if World.validPosition(position) then
+                return position, "carlos:return"
+            end
+        end
+        local carlos = Workspace:FindFirstChild("[CARLOS_DELGADO]")
+        local position = World.position(carlos)
+        if World.validPosition(position) then
+            return position, "carlos:return"
+        end
+    elseif carlosState == "Active" then
+        local characters = Workspace:FindFirstChild("Characters")
+        local nearest, nearestDistance = nil, math.huge
+        if characters and LocalPlayer:GetAttribute("CarlosQuestEquipped") == true then
+            for _, model in ipairs(characters:GetChildren()) do
+                if model:IsA("Model") and model:GetAttribute("ArchiveID") == "ShielderArchive" and World.isZombie(model) then
+                    local part = model:FindFirstChild("HumanoidRootPart") or model.PrimaryPart
+                    if part and part:IsA("BasePart") and part.Position and World.validPosition(part.Position) then
+                        local origin = World.origin()
+                        local distance = origin and (part.Position - origin).Magnitude or 0
+                        if distance < nearestDistance then
+                            nearest, nearestDistance = part, distance
+                        end
+                    end
+                end
+            end
+        end
+        if nearest then
+            return nearest.Position, "carlos:shielder"
+        end
+    end
+    for _, attributeName in ipairs({"QuestTargetPosition", "QuestMarkerPosition", "ActiveQuestPosition", "ManhattanQuestTargetPosition", "YuriQuestTargetPosition", "YuriNVGMarkerPosition", "CarlosQuestTargetPosition", "CarlosQuestMarkerPosition", "MinimapObjectiveCarlosPosition"}) do
+        local position = LocalPlayer:GetAttribute(attributeName)
+        if World.validPosition(position) then
+            return position, "attribute:" .. attributeName
+        end
+    end
+    local objective = World.closest(World.objectives())
+    if objective and World.validPosition(objective.position) then
+        return objective.position, objective.key
+    end
+    return nil, nil
+end
+
+function World.questPromptAllowed(prompt)
+    if not prompt or not prompt:IsA("ProximityPrompt") then
+        return false
+    end
+    local text = string.lower(table.concat({prompt.Name, prompt.ActionText, prompt.ObjectText}, " "))
+    if string.find(text, "ammo", 1, true) or string.find(text, "weapon", 1, true) or string.find(text, "crate", 1, true) then
+        return false
+    end
+    if prompt:GetAttribute("QuestPrompt") == true or prompt:GetAttribute("QuestId") ~= nil or prompt:GetAttribute("Quest") ~= nil then
+        return true
+    end
+    for _, term in ipairs({"quest", "antonio", "josh", "carry", "pickup", "patient", "rescue", "delivery", "manhattan", "yuri", "gunter", "carlos", "delgado", "felsi", "informant", "ristretto", "elsher", "sample", "objective", "talk", "sidequest"}) do
+        if string.find(text, term, 1, true) then
+            return true
+        end
+    end
+    local parent = prompt.Parent
+    for _ = 1, 5 do
+        if not parent then
+            break
+        end
+        local name = string.lower(parent.Name)
+        if string.find(name, "quest", 1, true) or string.find(name, "antonio", 1, true) or string.find(name, "carry", 1, true) or string.find(name, "josh", 1, true) or string.find(name, "yuri", 1, true) or string.find(name, "gunter", 1, true) or string.find(name, "carlos", 1, true) or string.find(name, "delgado", 1, true) or string.find(name, "felsi", 1, true) or string.find(name, "informant", 1, true) or string.find(name, "ristretto", 1, true) or string.find(name, "elsher", 1, true) or string.find(name, "sidequest", 1, true) then
+            return true
+        end
+        parent = parent.Parent
+    end
+    return false
+end
+
+function World.questPromptPosition(prompt)
+    local parent = prompt and prompt.Parent
+    for _ = 1, 8 do
+        if not parent then
+            return nil
+        end
+        local position = World.position(parent)
+        if World.validPosition(position) then
+            return position
+        end
+        parent = parent.Parent
+    end
+    return nil
+end
+
+function World.refreshQuestPrompts()
+    Quest.scanAt = os.clock() + 1
+    table.clear(Quest.prompts)
+    local descendants = Workspace:GetDescendants()
+    for _, object in ipairs(descendants) do
+        if object:IsA("ProximityPrompt") and World.questPromptAllowed(object) then
+            table.insert(Quest.prompts, object)
+            if #Quest.prompts >= 300 then
+                break
+            end
+        end
+    end
+end
+
+function World.questStep()
+    if AUTO_QUEST_TEMP_DISABLED or not settings.autoQuest then
+        return
+    end
+    local now = os.clock()
+    if now < Quest.next then
+        return
+    end
+    if now >= Quest.scanAt then
+        World.refreshQuestPrompts()
+    end
+    local origin = World.origin()
+    local target, targetKey = World.questAnchor()
+    Quest.target = targetKey
+    local best, bestDistance = nil, math.huge
+    for _, prompt in ipairs(Quest.prompts) do
+        if prompt.Parent and prompt.Enabled then
+            local position = World.questPromptPosition(prompt)
+            if position then
+                local distance = origin and (position - origin).Magnitude or math.huge
+                local nearTarget = target and (position - target).Magnitude <= 22
+                local nearPlayer = distance <= math.max(12, (prompt.MaxActivationDistance or 10) + 4)
+                if (nearTarget or nearPlayer) and distance < bestDistance then
+                    best, bestDistance = prompt, distance
+                end
+            end
+        end
+    end
+    if best and type(fireproximityprompt) == "function" then
+        local ok = pcall(fireproximityprompt, best)
+        if ok then
+            Quest.lastAction = now
+            Quest.next = now + 0.7
+            return
+        end
+    end
+    if target and origin and (target - origin).Magnitude > 7 then
+        if World.teleport(target + Vector3.new(0, 2.5, 0)) then
+            Quest.lastAction = now
+            Quest.next = now + 0.75
+            return
+        end
+    end
+    if not target and origin then
+        local nearestPrompt, nearestPosition, nearestDistance = nil, nil, math.huge
+        for _, prompt in ipairs(Quest.prompts) do
+            if prompt.Parent and prompt.Enabled then
+                local position = World.questPromptPosition(prompt)
+                if position then
+                    local distance = (position - origin).Magnitude
+                    if distance < nearestDistance then
+                        nearestPrompt, nearestPosition, nearestDistance = prompt, position, distance
+                    end
+                end
+            end
+        end
+        if nearestPrompt and nearestPosition and nearestDistance > 7 and World.teleport(nearestPosition + Vector3.new(0, 2.5, 0)) then
+            Quest.lastAction = now
+            Quest.next = now + 0.75
+            return
+        end
+    end
+    Quest.next = now + 0.45
+end
+
 function Visual.makeBillboard(adornee, color)
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "HallowedHubLabel"
@@ -23291,7 +23604,7 @@ function Visual.bone(entry, index)
 end
 
 function Visual.updateCharacters(origin)
-    local anyNPC = settings.espNPC or settings.mobBoxes or settings.mobSkeletons or settings.espBoss or settings.bossBoxes or settings.bossSkeletons
+    local anyNPC = settings.espNPC or settings.espBoss
     if not (settings.espPlayers or settings.espAllies or anyNPC) or not origin then
         Visual.clearMap(Visual.characters)
         return
@@ -23303,20 +23616,18 @@ function Visual.updateCharacters(origin)
             local boss = relation == "npc" and World.isBoss(model)
             local npc = relation == "npc" and World.isHostile(model, true)
             local showLabel = relation == "ally" and settings.espAllies or relation == "player" and settings.espPlayers or npc and (boss and settings.espBoss or not boss and settings.espNPC)
-            local showBox = npc and (boss and settings.bossBoxes or not boss and settings.mobBoxes)
-            local showSkeleton = npc and (boss and settings.bossSkeletons or not boss and settings.mobSkeletons)
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             local part = World.characterPart(model)
-            if (showLabel or showBox or showSkeleton) and humanoid and humanoid.Health > 0 and part then
+            if showLabel and humanoid and humanoid.Health > 0 and part then
                 local distance = (part.Position - origin).Magnitude
                 if distance <= settings.espDistance then
-                    table.insert(candidates, {key = model, part = part, humanoid = humanoid, player = player, relation = relation, boss = boss, distance = distance, label = showLabel, box = showBox, skeleton = showSkeleton})
+                    table.insert(candidates, {key = model, part = part, humanoid = humanoid, player = player, relation = relation, boss = boss, distance = distance, label = showLabel})
                 end
             end
         end
     end
     table.sort(candidates, function(a, b) return a.distance < b.distance end)
-    local keep, skeletonCount = {}, 0
+    local keep = {}
     for index = 1, math.min(#candidates, 64) do
         local candidate = candidates[index]
         local model = candidate.key
@@ -23328,9 +23639,8 @@ function Visual.updateCharacters(origin)
             Visual.characters[model] = entry
         end
         entry.color = color
-        entry.showBox = candidate.box == true
-        entry.showSkeleton = candidate.skeleton == true and skeletonCount < 40
-        if entry.showSkeleton then skeletonCount += 1 end
+        entry.showBox = false
+        entry.showSkeleton = false
         if candidate.label then
             if not entry.billboard then
                 entry.billboard, entry.label = Visual.makeBillboard(candidate.part, color)
@@ -23555,7 +23865,7 @@ function Visual.updateObjectives(origin)
 end
 
 function Visual.update()
-    if not (settings.espPlayers or settings.espAllies or settings.espNPC or settings.mobBoxes or settings.mobSkeletons or settings.espBoss or settings.bossBoxes or settings.bossSkeletons or settings.espPickups or settings.espObjectives) then
+    if not (settings.espPlayers or settings.espAllies or settings.espNPC or settings.espBoss or settings.espPickups or settings.espObjectives) then
         if next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
             Visual.clearAll()
         end
@@ -23655,7 +23965,7 @@ end
 function World.isZombie(model)
     if not World.isHostile(model) or World.findPlayer(model) then return false end
     local name = string.lower(model.Name)
-    if name == "rif" or string.match(name, "^rif[%s_%-]") then return false end
+    if (name == "rif" or string.match(name, "^rif[%s_%-]")) and not string.find(name, "shielder", 1, true) then return false end
     if model:GetAttribute("Infected") == true or model:GetAttribute("Zombie") == true then return true end
     for _, term in ipairs({"infected", "zombie", "viral", "lurker", "mutant", "crawler", "grabby", "barnacle", "riser", "kamikaze", "slasher", "radaway", "vorax", "deceiver", "shielder", "gunner", "fury", "chimera", "cerberus", "gilbert", "d-zero", "dzero", "bomber", "leaper"}) do
         if string.find(name, term, 1, true) then return true end
@@ -23715,38 +24025,55 @@ function UI.updateTrackers()
 end
 
 function World.targetPoint(model)
-    local partName = settings.targetPart
-    if partName == "Head" or partName == "Root" then
-        local part = model:FindFirstChild(partName == "Head" and "Head" or "HumanoidRootPart")
-        if part and part:IsA("BasePart") then return part.Position end
-    elseif partName == "Torso" then
-        for _, name in ipairs({"UpperTorso", "Torso", "LowerTorso"}) do
-            local part = model:FindFirstChild(name)
-            if part and part:IsA("BasePart") then return part.Position end
-        end
-    end
-    local attachment = model:FindFirstChild("AimAssistPoint", true)
-    if attachment and attachment:IsA("Attachment") then
-        return attachment.WorldPosition
-    end
-    for _, name in ipairs({"UpperTorso", "Torso", "HumanoidRootPart"}) do
-        local part = model:FindFirstChild(name)
-        if part and part:IsA("BasePart") then
-            return part.Position
-        end
+    if not model or not model:IsA("Model") then return nil end
+    local head = model:FindFirstChild("Head", true)
+    if head and head:IsA("BasePart") then
+        return head.Position
     end
     return nil
 end
 
 function World.inAimFov(position)
-    if settings.aimMode ~= "Screen" then return true end
+    if settings.aimMode == "360" then return true end
     local camera = Workspace.CurrentCamera
     if not camera or not World.validPosition(position) then return false end
-    local point, onScreen = camera:WorldToViewportPoint(position)
-    if not onScreen or point.Z <= 0 then return false end
-    local size = camera.ViewportSize
-    local x, y = point.X - size.X * 0.5, point.Y - size.Y * 0.5
-    return x * x + y * y <= settings.aimRadius * settings.aimRadius
+    local offset = position - camera.CFrame.Position
+    local magnitude = offset.Magnitude
+    if magnitude < 0.01 then return true end
+    local direction = offset / magnitude
+    local dot = math.clamp(camera.CFrame.LookVector:Dot(direction), -1, 1)
+    if dot <= 0 then return false end
+    local angle = math.deg(math.acos(dot))
+    local fov = math.clamp(tonumber(settings.aimRadius) or 35, 1, 179)
+    return angle <= fov * 0.5
+end
+
+function World.hasZombieShield(model)
+    if not model or not model:IsA("Model") or not World.isZombie(model) then return false end
+    for _, attributeName in ipairs({"RiotShieldEquipped", "ShieldEquipped", "HasShield", "ShieldActive"}) do
+        if model:GetAttribute(attributeName) == true then return true end
+    end
+    local collisionBody = model:FindFirstChild("RiotShieldCollisionBody", true)
+    if collisionBody and collisionBody:IsA("BasePart") then return true end
+    local name = string.lower(model.Name)
+    return string.find(name, "shielder", 1, true) ~= nil or string.find(name, "shield", 1, true) ~= nil
+end
+
+function World.isZombieShieldPart(instance, target)
+    if typeof(instance) ~= "Instance" or not target or not World.hasZombieShield(target) then return false end
+    local current = instance
+    for _ = 1, 10 do
+        if not current or current == Workspace or current == target then break end
+        local name = string.lower(current.Name)
+        if name == "riotshieldcollisionbody" or string.find(name, "riotshield", 1, true) or string.find(name, "shield", 1, true) then
+            return true
+        end
+        if current:GetAttribute("RiotShieldPart") == true or current:GetAttribute("ShieldPart") == true or current:GetAttribute("RiotShieldCollisionBody") == true then
+            return true
+        end
+        current = current.Parent
+    end
+    return false
 end
 
 function World.visible(origin, position, target)
@@ -23782,19 +24109,23 @@ function World.visible(origin, position, target)
         if not hit:IsA("BasePart") then
             return false
         end
-        local ancestor = hit.Parent
-        while ancestor and ancestor ~= Workspace do
-            if ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid") then
-                return false
-            end
-            ancestor = ancestor.Parent
-        end
-        local ignoreValue = hit:FindFirstChild("Ignore")
-        local ignore = ignoreValue and ignoreValue:IsA("BoolValue") and ignoreValue.Value == true
-        if hit.Transparency >= 1 or not hit.CanCollide or ignore then
+        if World.isZombieShieldPart(hit, target) then
             table.insert(ignored, hit)
         else
-            return false
+            local ancestor = hit.Parent
+            while ancestor and ancestor ~= Workspace do
+                if ancestor:IsA("Model") and ancestor:FindFirstChildOfClass("Humanoid") then
+                    return false
+                end
+                ancestor = ancestor.Parent
+            end
+            local ignoreValue = hit:FindFirstChild("Ignore")
+            local ignore = ignoreValue and ignoreValue:IsA("BoolValue") and ignoreValue.Value == true
+            if hit.Transparency >= 1 or not hit.CanCollide or ignore then
+                table.insert(ignored, hit)
+            else
+                return false
+            end
         end
     end
     return false
@@ -23971,7 +24302,7 @@ function Silent.choose(origin, config, npcOnly)
         maxTravel = math.min(maxTravel, Silent.liveMaxDistance)
     end
     npcOnly = npcOnly == true
-    local checkWalls = npcOnly or settings.wallCheck
+    local checkWalls = true
     local now = os.clock()
     local target, position = Silent.target, nil
     local rescan = now >= Silent.nextTargetScan or Silent.targetTravel ~= maxTravel or Silent.targetNpcOnly ~= npcOnly or Silent.targetWalls ~= checkWalls or not target or not World.isHostile(target) or npcOnly and not World.isZombie(target)
@@ -24007,16 +24338,19 @@ function Silent.wrapNetwork(record, self, name, ...)
     if not record.live or not App.alive then
         return original(self, name, ...)
     end
-    if name ~= "fire" and name ~= "reload" and name ~= "magout" and name ~= "glass" then
-        return original(self, name, ...)
-    end
     local args = table.pack(...)
     local tool, config = args[1], args[2]
     if Combat.hooksWanted() and args.n >= 2 then
         pcall(Combat.observe, tool, config)
     end
+    if args.n >= 2 then
+        args[2] = Combat.serverPayload(tool, config)
+    end
+    if name ~= "fire" and name ~= "reload" and name ~= "magout" and name ~= "glass" then
+        return original(self, name, table.unpack(args, 1, args.n))
+    end
     if name ~= "fire" then
-        return original(self, name, ...)
+        return original(self, name, table.unpack(args, 1, args.n))
     end
     if tool == Combat.tool and type(config) == "table" and args.n >= 3 then
         Auto.shots += 1
@@ -24029,26 +24363,27 @@ function Silent.wrapNetwork(record, self, name, ...)
     end
     if not settings.silentAim then
         Silent.shot = nil
-        return original(self, name, ...)
+        return original(self, name, table.unpack(args, 1, args.n))
     end
     if args.n < 3 or typeof(args[3]) ~= "Vector3" or tool ~= Combat.tool or type(config) ~= "table" then
-        return original(self, name, ...)
+        return original(self, name, table.unpack(args, 1, args.n))
     end
     local ok, origin = pcall(Silent.muzzle, tool, config)
     if not ok or typeof(origin) ~= "Vector3" then
-        return original(self, name, ...)
+        return original(self, name, table.unpack(args, 1, args.n))
     end
     local fire = type(config.fire) == "table" and config.fire or nil
     local pellets = fire and tonumber(fire.bulletPerRound) or 1
     if not pellets or pellets ~= pellets or pellets < 1 or pellets > 200 then pellets = 1 end
     local shot = {network = record, tool = tool, origin = origin, originalDirection = args[3], time = os.clock(), remaining = math.floor(pellets), fire = fire, speed = fire and tonumber(fire.fireSpeed) or nil}
     Silent.shot = shot
-    if Silent.pairNetwork == record and Silent.pairActive() then
+    if settings.silentAim and Silent.pairNetwork == record and Silent.pairActive() then
         local chooseOk, direction, target = pcall(Silent.choose, origin, config, Auto.held and Auto.heldTool == tool)
         if chooseOk and typeof(direction) == "Vector3" and target then
             args[3] = direction
             shot.direction = direction
             shot.target = target
+            shot.shieldPass = settings.shieldPenetration and World.hasZombieShield(target) or false
             shot.cast = Silent.pairCast
         end
     end
@@ -24089,6 +24424,39 @@ function Silent.wrapCast(record, caster, ...)
         Silent.liveAcceleration = typeof(acceleration) == "Vector3" and World.validPosition(acceleration) and acceleration or nil
         local maxDistance = tonumber(behavior.MaxDistance)
         Silent.liveMaxDistance = maxDistance and maxDistance == maxDistance and maxDistance > 0 and maxDistance < math.huge and maxDistance or nil
+        if shot.shieldPass and type(behavior) == "table" then
+            local state = rawget(behavior, "__hubShieldPierce")
+            if type(state) ~= "table" then
+                state = {original = rawget(behavior, "CanPierceFunction"), shot = nil, expires = 0}
+                state.wrapper = function(pa, pb, pc, pd)
+                    local originalPierce = state.original
+                    local callOk, result = true, false
+                    if type(originalPierce) == "function" then
+                        callOk, result = pcall(originalPierce, pa, pb, pc, pd)
+                    end
+                    if callOk and result == true then
+                        return true
+                    end
+                    local activeShot = state.shot
+                    local hitInstance = type(pb) == "table" and pb.Instance or nil
+                    if activeShot and os.clock() <= state.expires and typeof(hitInstance) == "Instance" and World.isZombieShieldPart(hitInstance, activeShot.target) then
+                        return true
+                    end
+                    return callOk and result or false
+                end
+                local installed = pcall(function()
+                    behavior.CanPierceFunction = state.wrapper
+                    behavior.__hubShieldPierce = state
+                end)
+                if not installed then
+                    state = nil
+                end
+            end
+            if type(state) == "table" then
+                state.shot = shot
+                state.expires = now + 0.5
+            end
+        end
         if shot.direction and shot.cast == record then
             args[2] = shot.direction
             if typeof(velocity) == "Vector3" then args[3] = shot.direction * actualSpeed end
@@ -24106,41 +24474,46 @@ function Silent.installTable(target, kind)
     if type(target) ~= "table" or Silent.hooks[target] then
         return
     end
-    local key = kind == "network" and "FireServer" or "Fire"
-    local ok, original = pcall(rawget, target, key)
-    if not ok or type(original) ~= "function" then
-        return
-    end
-    local record = {target = target, key = key, original = original, kind = kind, live = true}
-    if kind == "network" then
-        record.dispatch = Silent.wrapNetwork
-        record.wrapper = function(self, name, ...)
-            local dispatch = record.dispatch
-            if dispatch then
-                return dispatch(record, self, name, ...)
+    local keys = kind == "network" and {"FireServer", "InvokeServer"} or {"Fire"}
+    local installed = false
+    for _, key in ipairs(keys) do
+        local ok, original = pcall(rawget, target, key)
+        if ok and type(original) == "function" then
+            local record = {target = target, key = key, original = original, kind = kind, live = true}
+            if kind == "network" then
+                record.dispatch = Silent.wrapNetwork
+                record.wrapper = function(self, name, ...)
+                    local dispatch = record.dispatch
+                    if dispatch then
+                        return dispatch(record, self, name, ...)
+                    end
+                    return record.original(self, name, ...)
+                end
+            else
+                record.dispatch = Silent.wrapCast
+                record.wrapper = function(caster, ...)
+                    local dispatch = record.dispatch
+                    if dispatch then
+                        return dispatch(record, caster, ...)
+                    end
+                    return record.original(caster, ...)
+                end
             end
-            return record.original(self, name, ...)
-        end
-    else
-        record.dispatch = Silent.wrapCast
-        record.wrapper = function(caster, ...)
-            local dispatch = record.dispatch
-            if dispatch then
-                return dispatch(record, caster, ...)
+            local wrote = pcall(function()
+                target[key] = record.wrapper
+            end)
+            if wrote and rawget(target, key) == record.wrapper then
+                installed = true
+                table.insert(Silent.records, record)
+            else
+                record.live = false
+                record.dispatch = nil
+                record.target = nil
             end
-            return record.original(caster, ...)
         end
     end
-    local wrote = pcall(function()
-        target[key] = record.wrapper
-    end)
-    if wrote and rawget(target, key) == record.wrapper then
-        Silent.hooks[target] = record
-        table.insert(Silent.records, record)
-    else
-        record.live = false
-        record.dispatch = nil
-        record.target = nil
+    if installed then
+        Silent.hooks[target] = true
     end
 end
 
@@ -24191,6 +24564,15 @@ end
 function Silent.tryInstall()
     if not App.alive or not Combat.hooksWanted() or not Combat.tool then
         return
+    end
+    local assets = ReplicatedStorage:FindFirstChild("Assets")
+    local modules = assets and assets:FindFirstChild("Modules")
+    local networkModule = modules and modules:FindFirstChild("Network")
+    if networkModule and networkModule:IsA("ModuleScript") then
+        local ok, network = pcall(require, networkModule)
+        if ok and type(network) == "table" then
+            Silent.installTable(network, "network")
+        end
     end
     if settings.silentAim and Silent.pairActive() then
         return
@@ -24915,6 +25297,9 @@ function App.set(key, value)
     if cleaned == nil then
         return false
     end
+    if key == "autoQuest" and AUTO_QUEST_TEMP_DISABLED then
+        cleaned = false
+    end
     if settings[key] == cleaned then
         UI.refreshControls()
         return true
@@ -24924,6 +25309,9 @@ function App.set(key, value)
         App.set("silentAim", true)
     elseif key == "silentAim" and not cleaned and settings.autoFire then
         App.set("autoFire", false)
+    elseif key == "autoQuest" and cleaned then
+        if not settings.silentAim then App.set("silentAim", true) end
+        if not settings.autoFire then App.set("autoFire", true) end
     end
     if key == "fpsBoost" or key == "superFpsBoost" then
         local mode = settings.superFpsBoost and 2 or settings.fpsBoost and 1 or 0
@@ -24968,22 +25356,22 @@ function App.set(key, value)
     elseif key == "instantPrompt" then
         World.updatePrompts()
     end
-    if key == "noRecoil" then
+    if key == "noRecoil" or key == "noSpread" then
         Combat.applyPatches()
         Combat.update()
         if not Combat.hooksWanted() then Silent.requestStop() end
-    elseif key == "silentAim" or key == "autoReload" or key == "autoPunch" then
+    elseif key == "silentAim" or key == "autoReload" or key == "autoPunch" or key == "shieldPenetration" then
         Combat.update()
         if not Combat.hooksWanted() then Silent.requestStop() end
     end
     if (key == "speedEnabled" or key == "stamina" or key == "antiStagger" or key == "noSlow" or key == "fastReload") and cleaned or key == "speed" and settings.speedEnabled or (key == "felsiReload" or key == "squadReload") and settings.fastReload then
         Motion.updateProperties()
     end
-    if key == "targetPart" or key == "aimMode" or key == "aimRadius" or key == "wallCheck" then
+    if key == "aimMode" or key == "aimRadius" or key == "shieldPenetration" then
         Silent.target = nil
         Silent.nextTargetScan = 0
     end
-    if key == "espPlayers" or key == "espAllies" or key == "espNPC" or key == "espBoss" or key == "mobBoxes" or key == "mobSkeletons" or key == "bossBoxes" or key == "bossSkeletons" or key == "mobColor" or key == "bossColor" or key == "espObjectives" or key == "espPickups" then
+    if key == "espPlayers" or key == "espAllies" or key == "espNPC" or key == "espBoss" or key == "mobColor" or key == "bossColor" or key == "espObjectives" or key == "espPickups" then
         local ok = pcall(Visual.update)
         if not ok then
             App.notice("ESP: update failed")
@@ -25070,8 +25458,8 @@ function UI.build()
         end
     end
     local window = library:CreateWindow({
-        Name = "Ixa Hub test HALLOWED REACTOR",
-        Title = "Ixa Hub test",
+        Name = "Ixa Hub HALLOWED REACTOR",
+        Title = "Ixa Hub",
         LoadingSubtitle = "HALLOWED REACTOR",
         ToggleUIKeybind = "K",
         Parent = guiHost,
@@ -25117,12 +25505,6 @@ function UI.build()
             for flag, entry in pairs(entries) do
                 if type(flag) ~= "string" or string.sub(flag, 1, 3) ~= "HR_" or library.Flags[flag] ~= nil then
                     migrated[flag] = entry
-                end
-            end
-            if migrated.HR_targetPart == nil then
-                local previous = entries.HR_silentHead or entries.HR_aimHead
-                if type(previous) == "table" and type(previous.Value) == "boolean" then
-                    migrated.HR_targetPart = {Type = "Dropdown", Value = previous.Value and "Head" or "Body"}
                 end
             end
             local automatic = migrated.HR_autoFire
@@ -25173,30 +25555,29 @@ function UI.build()
         window.Unload = window.Destroy
     end
 
-    local aimPage = window:CreateTab({Name = "Aim", Icon = "crosshair"})
     local combatPage = window:CreateTab({Name = "Combat", Icon = "swords"})
     local visualsPage = window:CreateTab({Name = "Visuals", Icon = "eye"})
     local miscPage = window:CreateTab({Name = "Misc", Icon = "settings"})
     local settingsPage = window:CreateTab({Name = "Settings", Icon = "sliders-horizontal"})
 
-    local aim = aimPage:CreateGroupbox({Name = "Silent Aim", Side = "Left"})
+    local aim = combatPage:CreateGroupbox({Name = "Aim And Fire", Side = "Left"})
     UI.addToggle(aim, "silentAim", "Silent Aim")
     UI.addToggle(aim, "autoFire", "Smart Auto Fire")
-    UI.addChoice(aim, "targetPart", "Target Part")
-    UI.addToggle(aim, "wallCheck", "Wall Check")
+    UI.addToggle(aim, "shieldPenetration", "Zombie Shield Bypass")
     UI.addChoice(aim, "aimMode", "FOV Mode")
-    UI.addToggle(aim, "showAimFov", "Show FOV")
-    UI.addSlider(aim, "aimRadius", "FOV Radius")
+    UI.addToggle(aim, "showAimFov", "Show Camera FOV")
+    UI.addSlider(aim, "aimRadius", "Camera Aim FOV", "°")
     UI.addColor(aim, "aimColor", "FOV Color")
 
-    local weapons = combatPage:CreateGroupbox({Name = "Weapons", Side = "Left"})
+    local weapons = combatPage:CreateGroupbox({Name = "Weapons", Side = "Right"})
     UI.addToggle(weapons, "noRecoil", "No Recoil")
+    UI.addToggle(weapons, "noSpread", "No Spread")
     UI.addToggle(weapons, "autoReload", "Auto Reload")
     UI.addChoice(weapons, "reloadKey", "Reload Key")
     UI.addToggle(weapons, "fastReload", "Fast Reload")
     UI.addSlider(weapons, "felsiReload", "Felsi Reload Speed", "%")
     UI.addSlider(weapons, "squadReload", "Squad Reload Speed", "%")
-    local melee = combatPage:CreateGroupbox({Name = "Melee", Side = "Right"})
+    local melee = combatPage:CreateGroupbox({Name = "Melee", Side = "Left"})
     UI.addToggle(melee, "autoPunch", "Auto Punch")
     UI.addSlider(melee, "punchRange", "Auto Punch Range")
     UI.addChoice(melee, "punchKey", "Punch Key")
@@ -25205,12 +25586,8 @@ function UI.build()
     UI.addToggle(esp, "espPlayers", "Player ESP")
     UI.addToggle(esp, "espAllies", "Ally ESP")
     UI.addToggle(esp, "espNPC", "Mob ESP")
-    UI.addToggle(esp, "mobBoxes", "Mob Boxes")
-    UI.addToggle(esp, "mobSkeletons", "Mob Skeletons")
     UI.addColor(esp, "mobColor", "Mob Color")
     UI.addToggle(esp, "espBoss", "Boss ESP")
-    UI.addToggle(esp, "bossBoxes", "Boss Boxes")
-    UI.addToggle(esp, "bossSkeletons", "Boss Skeletons")
     UI.addColor(esp, "bossColor", "Boss Color")
     UI.addToggle(esp, "espObjectives", "Objective ESP")
     UI.addToggle(esp, "espPickups", "Pickup ESP")
@@ -25242,7 +25619,7 @@ function UI.build()
     world:Button({Name = "Return to Saved Position", Callback = World.returnPosition})
     local performance = miscPage:CreateGroupbox({Name = "Performance", Side = "Right"})
     UI.addToggle(performance, "fpsBoost", "FPS Optimization")
-    UI.addToggle(performance, "superFpsBoost", "Super FPS Optimization")
+    UI.addToggle(performance, "superFpsBoost", "Super FPS Optimization (Remove Extras)")
 
     local general = settingsPage:CreateGroupbox({Name = "Controls", Side = "Left"})
     general:Button({Name = "Reset Settings and Disable Features", Callback = App.reset})
@@ -25641,7 +26018,7 @@ App.connect(Lighting.ChildRemoved, function(child)
     end
 end)
 
-local elapsed = {weapon = 0, esp = 0, lighting = 0, prompt = 0, fps = 0, optimization = 0, motion = 0, drawing = 0}
+local elapsed = {weapon = 0, esp = 0, lighting = 0, prompt = 0, quest = 0, fps = 0, optimization = 0, motion = 0, drawing = 0}
 App.connect(RunService.Stepped, function()
     if App.alive and (settings.noclip or Guard.groups.noclip) then
         App.safe("Noclip", Motion.updateNoclip)
@@ -25666,12 +26043,14 @@ App.connect(RunService.Heartbeat, function(delta)
     if Optimizer.head <= Optimizer.tail or Optimizer.restoreNormal or Optimizer.restoreSuper then
         App.safe("FPS optimization", Optimizer.step)
     end
-    if Optimizer.mode > 0 then
+    if Optimizer.mode == 1 then
         elapsed.optimization += delta
-        if elapsed.optimization >= 0.1 then
+        if elapsed.optimization >= 0.45 then
             elapsed.optimization = 0
             App.safe("FPS optimization refresh", Optimizer.maintain)
         end
+    else
+        elapsed.optimization = 0
     end
     elapsed.motion += delta
     if elapsed.motion >= 0.25 then
@@ -25684,6 +26063,13 @@ App.connect(RunService.Heartbeat, function(delta)
     elapsed.esp += delta
     elapsed.lighting += delta
     elapsed.prompt += delta
+    elapsed.quest += delta
+    if elapsed.quest >= 0.2 then
+        elapsed.quest = 0
+        if settings.autoQuest and not AUTO_QUEST_TEMP_DISABLED then
+            App.safe("Auto Quest", World.questStep)
+        end
+    end
     if elapsed.weapon >= 0.3 then
         elapsed.weapon = 0
         if Combat.wanted() or Combat.tool or Combat.pending or #Combat.patches > 0 then
@@ -25692,7 +26078,7 @@ App.connect(RunService.Heartbeat, function(delta)
     end
     if elapsed.esp >= 0.5 then
         elapsed.esp = 0
-        if settings.espPlayers or settings.espAllies or settings.espNPC or settings.mobBoxes or settings.mobSkeletons or settings.espBoss or settings.bossBoxes or settings.bossSkeletons or settings.espPickups or settings.espObjectives or next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
+        if settings.espPlayers or settings.espAllies or settings.espNPC or settings.espBoss or settings.espPickups or settings.espObjectives or next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
             App.safe("ESP", Visual.update)
         end
         if settings.eventTracker or settings.threatTracker then
@@ -25731,12 +26117,8 @@ RunService:BindToRenderStep(App.renderName, Enum.RenderPriority.Last.Value, func
     if settings.fovEnabled or Guard.groups.fov then
         App.safe("FOV", Visual.updateCamera)
     end
-    if settings.mobBoxes or settings.mobSkeletons or settings.bossBoxes or settings.bossSkeletons then
-        elapsed.drawing += type(delta) == "number" and math.clamp(delta, 0, 0.5) or 0.016
-        if elapsed.drawing >= 0.065 then
-            elapsed.drawing = 0
-            App.safe("ESP overlay", Visual.renderCharacters)
-        end
+    if settings.showAimFov then
+        App.safe("Aim FOV overlay", UI.refreshOverlays)
     end
     if settings.fps and type(delta) == "number" and delta > 0 then
         local fps = math.min(999, 1 / delta)
