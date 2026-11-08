@@ -21563,7 +21563,7 @@ local Reload = {
     ambiguousNames = {"Ammo", "ammo", "Clip", "Magazine"},
 }
 local Punch = {nextCheck = 0, nextAttempt = 0}
-local Visual = {characters = {}, pickups = {}, objectives = {}, accumulator = 0}
+local Visual = {characters = {}, pickups = {}, objectives = {}, accumulator = 0, telegraphs = {}, telegraphLinks = {}, telegraphAttackColor = Color3.fromRGB(255, 170, 40), telegraphEscapeColor = Color3.fromRGB(190, 120, 255)}
 local World = {shownPrompts = {}}
 local Quest = {next = 0, scanAt = 0, prompts = {}, target = nil, lastAction = 0}
 local AUTO_QUEST_TEMP_DISABLED = true
@@ -21856,6 +21856,8 @@ local defaults = {
     punchRange = 8,
     punchKey = "G",
     shieldPenetration = true,
+    aimSmart = true,
+    autoFireSpeed = 100,
     aimMode = "Camera",
     aimRadius = 35,
     showAimFov = false,
@@ -21880,9 +21882,12 @@ local defaults = {
     fps = false,
     instantPrompt = false,
     autoQuest = false,
+    thirdPerson = false,
+    bossTelegraphs = false,
 }
 local numeric = {
     speed = {12, 100},
+    autoFireSpeed = {50, 200},
     felsiReload = {60, 100},
     squadReload = {100, 200},
     punchRange = {2, 20},
@@ -22482,6 +22487,65 @@ function UI.refreshControls()
     UI.refreshOverlays()
 end
 
+local View = {applied = false, cameraMode = nil, minZoom = nil, maxZoom = nil, humanoid = nil}
+-- Mirrors the game's own hidden moderator command "perspective":
+-- Classic camera + 5-12 zoom + AutoRotate for third person, locked first person to revert.
+function View.apply()
+    if not settings.thirdPerson then
+        return false
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if not humanoid then
+        return false
+    end
+    if not View.applied then
+        View.cameraMode = LocalPlayer.CameraMode
+        View.minZoom = LocalPlayer.CameraMinZoomDistance
+        View.maxZoom = LocalPlayer.CameraMaxZoomDistance
+    end
+    LocalPlayer.CameraMaxZoomDistance = 12
+    LocalPlayer.CameraMinZoomDistance = 5
+    humanoid.AutoRotate = true
+    if LocalPlayer.CameraMode ~= Enum.CameraMode.Classic then
+        LocalPlayer.CameraMode = Enum.CameraMode.Classic
+    end
+    View.applied = true
+    View.humanoid = humanoid
+    return true
+end
+
+function View.maintain()
+    if not settings.thirdPerson then
+        return
+    end
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    if humanoid and (not View.applied or View.humanoid ~= humanoid) then
+        View.apply()
+    end
+end
+
+function View.restore()
+    if not View.applied then
+        return false
+    end
+    View.applied = false
+    local character = LocalPlayer.Character
+    local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+    local mode = View.cameraMode or Enum.CameraMode.LockFirstPerson
+    local locked = mode == Enum.CameraMode.LockFirstPerson
+    LocalPlayer.CameraMaxZoomDistance = View.maxZoom or 0.5
+    LocalPlayer.CameraMinZoomDistance = View.minZoom or 0.5
+    if humanoid then
+        humanoid.AutoRotate = not locked
+    end
+    LocalPlayer.CameraMode = mode
+    View.cameraMode, View.minZoom, View.maxZoom = nil, nil, nil
+    View.humanoid = nil
+    return true
+end
+
 function Motion.disconnectCharacter()
     for _, connection in ipairs(Motion.characterConnections) do
         connection:Disconnect()
@@ -22528,6 +22592,9 @@ function Motion.bindCharacter(character)
     Motion.root = nil
     Motion.parts = {}
     Motion.watchParts()
+    if character and settings.thirdPerson then
+        View.apply()
+    end
 end
 
 function Motion.resolve()
@@ -23144,32 +23211,6 @@ function World.teleport(position)
     return true
 end
 
-function World.teleportNearestObjective()
-    local target = World.closest(World.objectives())
-    if not target then
-        App.notice("No active objectives found")
-        return false
-    end
-    if World.teleport(target.position + Vector3.new(0, 3, 0)) then
-        App.notice("Objective: " .. target.name .. "; the server may move you back")
-        return true
-    end
-    return false
-end
-
-function World.teleportNearestPickup()
-    local target = World.closest(World.pickups())
-    if not target then
-        App.notice("No PickupHighlight items found")
-        return false
-    end
-    if World.teleport(target.position + Vector3.new(0, 3, 0)) then
-        App.notice("Item: " .. target.name .. "; the server may move you back")
-        return true
-    end
-    return false
-end
-
 function World.savePosition()
     local _, humanoid, root = Motion.resolve()
     if humanoid and root and humanoid.Health > 0 then
@@ -23426,6 +23467,119 @@ function World.questStep()
     Quest.next = now + 0.45
 end
 
+local telegraphAttackPatterns = {"attack", "slash", "swing", "strike", "slam", "bite", "claw", "combo", "dropkick", "kick", "punch", "shoot", "fire", "bomb", "explod", "sweep", "spin", "stab", "chomp", "gouge", "stomp", "swipe", "cleave"}
+local telegraphEscapePatterns = {"dodge", "dash", "sandy", "teleport", "blink", "burnout", "escape", "vanish", "retreat"}
+
+-- Classifies a boss animation track name as an incoming-attack or a dodge/escape telegraph.
+-- Client-side, read-only (replicated animations only); never blocks or redirects anything.
+function Visual.classifyTelegraph(name)
+    local lower = string.lower(tostring(name or ""))
+    if lower == "" then
+        return nil
+    end
+    for _, pattern in ipairs(telegraphAttackPatterns) do
+        if string.find(lower, pattern, 1, true) then
+            return "attack"
+        end
+    end
+    for _, pattern in ipairs(telegraphEscapePatterns) do
+        if string.find(lower, pattern, 1, true) then
+            return "escape"
+        end
+    end
+    return nil
+end
+
+-- Standalone telegraph tracking for the Boss Telegraph Flash, independent of ESP.
+function Visual.syncTelegraphLinks()
+    local want = settings.bossTelegraphs
+    local characters = Workspace:FindFirstChild("Characters")
+    local seen = {}
+    if want and characters then
+        for _, model in ipairs(characters:GetChildren()) do
+            if model:IsA("Model") and model ~= LocalPlayer.Character and World.isHostile(model, true) and World.isBoss(model) then
+                local humanoid = model:FindFirstChildOfClass("Humanoid")
+                local animator = humanoid and humanoid:FindFirstChildOfClass("Animator")
+                if animator then
+                    seen[model] = true
+                    local link = Visual.telegraphLinks[model]
+                    if link and link.animator == animator then
+                        -- already wired
+                    else
+                        if link then
+                            pcall(function()
+                                link.connection:Disconnect()
+                            end)
+                        end
+                        link = {animator = animator}
+                        link.connection = animator.AnimationPlayed:Connect(function(track)
+                            local okName, name = pcall(function()
+                                return track and track.Animation and track.Animation.Name or nil
+                            end)
+                            local kind = okName and Visual.classifyTelegraph(name) or nil
+                            if not kind then
+                                return
+                            end
+                            local length = 1.25
+                            local okLength, trackLength = pcall(function()
+                                return track.Length
+                            end)
+                            if okLength and type(trackLength) == "number" and trackLength == trackLength and trackLength > 0.1 and trackLength < 10 then
+                                length = math.min(trackLength, 6)
+                            end
+                            Visual.telegraphs[model] = {kind = kind, expiry = os.clock() + length}
+                        end)
+                        Visual.telegraphLinks[model] = link
+                    end
+                end
+            end
+        end
+    end
+    for model, link in pairs(Visual.telegraphLinks) do
+        if not seen[model] then
+            pcall(function()
+                link.connection:Disconnect()
+            end)
+            Visual.telegraphLinks[model] = nil
+            Visual.telegraphs[model] = nil
+        end
+    end
+end
+
+function Visual.clearTelegraphs()
+    for model, link in pairs(Visual.telegraphLinks) do
+        pcall(function()
+            link.connection:Disconnect()
+        end)
+        Visual.telegraphLinks[model] = nil
+    end
+    table.clear(Visual.telegraphs)
+end
+
+function Visual.pulseTelegraphs()
+    local flash = settings.bossTelegraphs == true
+    if not flash and next(Visual.telegraphs) == nil then
+        return
+    end
+    local now = os.clock()
+    for model, telegraph in pairs(Visual.telegraphs) do
+        local entry = Visual.characters[model]
+        if telegraph.expiry <= now then
+            Visual.telegraphs[model] = nil
+            if flash and entry and entry.highlight and entry.color then
+                entry.highlight.FillColor = entry.color
+                entry.highlight.OutlineColor = entry.color
+            end
+        elseif flash and entry and entry.highlight then
+            local color = telegraph.kind == "attack" and Visual.telegraphAttackColor or Visual.telegraphEscapeColor
+            if entry.highlight.FillColor ~= color then
+                entry.highlight.FillColor = color
+                entry.highlight.OutlineColor = color
+            end
+        end
+    end
+end
+
 function Visual.makeBillboard(adornee, color)
     local billboard = Instance.new("BillboardGui")
     billboard.Name = "HallowedHubLabel"
@@ -23487,6 +23641,7 @@ function Visual.clearAll()
     Visual.clearMap(Visual.characters)
     Visual.clearMap(Visual.pickups)
     Visual.clearMap(Visual.objectives)
+    Visual.clearTelegraphs()
 end
 
 function Visual.ensureFolder()
@@ -23604,7 +23759,7 @@ function Visual.bone(entry, index)
 end
 
 function Visual.updateCharacters(origin)
-    local anyNPC = settings.espNPC or settings.espBoss
+    local anyNPC = settings.espNPC or settings.espBoss or settings.bossTelegraphs
     if not (settings.espPlayers or settings.espAllies or anyNPC) or not origin then
         Visual.clearMap(Visual.characters)
         return
@@ -23615,7 +23770,7 @@ function Visual.updateCharacters(origin)
             local relation, player = World.playerRelation(model)
             local boss = relation == "npc" and World.isBoss(model)
             local npc = relation == "npc" and World.isHostile(model, true)
-            local showLabel = relation == "ally" and settings.espAllies or relation == "player" and settings.espPlayers or npc and (boss and settings.espBoss or not boss and settings.espNPC)
+            local showLabel = relation == "ally" and settings.espAllies or relation == "player" and settings.espPlayers or npc and (boss and (settings.espBoss or settings.bossTelegraphs) or not boss and settings.espNPC)
             local humanoid = model:FindFirstChildOfClass("Humanoid")
             local part = World.characterPart(model)
             if showLabel and humanoid and humanoid.Health > 0 and part then
@@ -23633,6 +23788,15 @@ function Visual.updateCharacters(origin)
         local model = candidate.key
         keep[model] = true
         local color = candidate.relation == "ally" and Color3.fromRGB(87, 209, 170) or candidate.relation == "npc" and UI.color(candidate.boss and settings.bossColor or settings.mobColor) or Color3.fromRGB(245, 106, 106)
+        local telegraph = nil
+        if settings.bossTelegraphs and candidate.boss then
+            telegraph = Visual.telegraphs[model]
+            if telegraph and telegraph.expiry <= os.clock() then
+                Visual.telegraphs[model] = nil
+                telegraph = nil
+            end
+        end
+        local highlightColor = telegraph and (telegraph.kind == "attack" and Visual.telegraphAttackColor or Visual.telegraphEscapeColor) or color
         local entry = Visual.characters[model]
         if not entry then
             entry = {}
@@ -23648,11 +23812,15 @@ function Visual.updateCharacters(origin)
             end
             entry.billboard.Adornee = candidate.part
             entry.billboard.MaxDistance = settings.espDistance
-            entry.highlight.FillColor = color
-            entry.highlight.OutlineColor = color
+            entry.highlight.FillColor = highlightColor
+            entry.highlight.OutlineColor = highlightColor
             entry.label.TextColor3 = color
             local name = candidate.player and candidate.player.DisplayName or model.Name
-            entry.label.Text = string.format("%s  [%dm]\nHP %d", tostring(name), math.floor(candidate.distance + 0.5), math.max(0, math.floor(candidate.humanoid.Health + 0.5)))
+            local text = string.format("%s  [%dm]\nHP %d", tostring(name), math.floor(candidate.distance + 0.5), math.max(0, math.floor(candidate.humanoid.Health + 0.5)))
+            if telegraph then
+                text = text .. (telegraph.kind == "attack" and "\n!! ATTACKING" or "\n>> ESCAPING")
+            end
+            entry.label.Text = text
         elseif entry.billboard then
             entry.billboard:Destroy()
             entry.highlight:Destroy()
@@ -23671,6 +23839,7 @@ function Visual.updateCharacters(origin)
         if not keep[model] then
             Visual.destroyEntry(entry)
             Visual.characters[model] = nil
+            Visual.telegraphs[model] = nil
         end
     end
 end
@@ -23962,8 +24131,15 @@ function World.isBoss(model)
     return false
 end
 
+function World.isShielderArchive(model)
+    if not model or not model:IsA("Model") then return false end
+    if model:GetAttribute("ArchiveID") == "ShielderArchive" then return true end
+    return false
+end
+
 function World.isZombie(model)
     if not World.isHostile(model) or World.findPlayer(model) then return false end
+    if World.isShielderArchive(model) then return true end
     local name = string.lower(model.Name)
     if (name == "rif" or string.match(name, "^rif[%s_%-]")) and not string.find(name, "shielder", 1, true) then return false end
     if model:GetAttribute("Infected") == true or model:GetAttribute("Zombie") == true then return true end
@@ -24050,6 +24226,7 @@ end
 
 function World.hasZombieShield(model)
     if not model or not model:IsA("Model") or not World.isZombie(model) then return false end
+    if World.isShielderArchive(model) then return true end
     for _, attributeName in ipairs({"RiotShieldEquipped", "ShieldEquipped", "HasShield", "ShieldActive"}) do
         if model:GetAttribute(attributeName) == true then return true end
     end
@@ -24096,7 +24273,7 @@ function World.visible(origin, position, target)
     local params = RaycastParams.new()
     params.FilterType = Enum.RaycastFilterType.Exclude
     params.IgnoreWater = true
-    for _ = 1, 6 do
+    for _ = 1, 12 do
         params.FilterDescendantsInstances = ignored
         local result = Workspace:Raycast(origin, direction, params)
         if not result then
@@ -24131,20 +24308,56 @@ function World.visible(origin, position, target)
     return false
 end
 
+-- Scores an eligible target; lower is better. Aim angle dominates, then distance;
+-- bosses are preferred, shielded zombies are avoided unless we pierce, and the currently
+-- locked target gets a stickiness bonus so shots don't dither between equidistant enemies.
+function World.scoreTarget(model, position, origin, retained)
+    local offset = position - origin
+    local distance = offset.Magnitude
+    local angle = 0
+    local camera = Workspace.CurrentCamera
+    if settings.aimMode ~= "360" and camera and distance > 0.01 then
+        local dot = math.clamp(camera.CFrame.LookVector:Dot(offset / distance), -1, 1)
+        angle = math.deg(math.acos(dot))
+    end
+    local score = angle * 2.4 + distance * 0.05
+    if World.isBoss(model) then
+        score = score - 60
+    end
+    if World.hasZombieShield(model) and not settings.shieldPenetration then
+        score = score + 150
+    end
+    if retained == model then
+        score = score * 0.75
+    end
+    return score
+end
+
 function World.selectSilentTarget(origin, maxTravel, accept, npcOnly, checkWalls)
     local characters = Workspace:FindFirstChild("Characters")
     if not characters or not World.validPosition(origin) then return nil end
-    local best, bestPosition, bestSolution, bestSquared = nil, nil, nil, maxTravel * maxTravel
+    local best, bestPosition, bestSolution = nil, nil, nil
+    local bestScore, bestSquared = math.huge, maxTravel * maxTravel
+    local maximumSquared = maxTravel * maxTravel
+    local smart = settings.aimSmart == true
+    local retained = smart and Silent.target or nil
     for _, model in ipairs(characters:GetChildren()) do
         if World.isHostile(model) and (not npcOnly or World.isZombie(model)) then
             local position = World.targetPoint(model)
             if World.validPosition(position) and World.inAimFov(position) then
                 local offset = position - origin
                 local distanceSquared = offset:Dot(offset)
-                if distanceSquared >= 0.0001 and distanceSquared <= bestSquared and (not checkWalls or World.visible(origin, position, model)) then
+                if distanceSquared >= 0.0001 and distanceSquared <= maximumSquared and (not checkWalls or World.visible(origin, position, model)) then
                     local solution = not accept and true or accept(model, position)
                     if solution then
-                        best, bestPosition, bestSolution, bestSquared = model, position, solution, distanceSquared
+                        if smart then
+                            local score = World.scoreTarget(model, position, origin, retained)
+                            if score < bestScore then
+                                best, bestPosition, bestSolution, bestScore = model, position, solution, score
+                            end
+                        elseif distanceSquared < bestSquared then
+                            best, bestPosition, bestSolution, bestSquared = model, position, solution, distanceSquared
+                        end
                     end
                 end
             end
@@ -24304,6 +24517,7 @@ function Silent.choose(origin, config, npcOnly)
     npcOnly = npcOnly == true
     local checkWalls = true
     local now = os.clock()
+    local speed = math.clamp((tonumber(settings.autoFireSpeed) or 100) / 100, 0.5, 2)
     local target, position = Silent.target, nil
     local rescan = now >= Silent.nextTargetScan or Silent.targetTravel ~= maxTravel or Silent.targetNpcOnly ~= npcOnly or Silent.targetWalls ~= checkWalls or not target or not World.isHostile(target) or npcOnly and not World.isZombie(target)
     if not rescan then
@@ -24328,7 +24542,7 @@ function Silent.choose(origin, config, npcOnly)
     Silent.targetTravel = maxTravel
     Silent.targetNpcOnly = npcOnly
     Silent.targetWalls = checkWalls
-    Silent.nextTargetScan = now + 0.1
+    Silent.nextTargetScan = now + math.clamp(0.1 / speed, 0.03, 0.1)
     if direction and target then return direction, target end
     return nil
 end
@@ -24758,6 +24972,10 @@ function Auto.reset()
     Auto.nextCheck = 0
 end
 
+function Auto.speedMultiplier()
+    return math.clamp((tonumber(settings.autoFireSpeed) or 100) / 100, 0.5, 2)
+end
+
 function Auto.duration(config)
     local fire = type(config) == "table" and type(config.fire) == "table" and config.fire or {}
     local function number(value)
@@ -24765,7 +24983,8 @@ function Auto.duration(config)
         if not value or value ~= value or value < 0 or value == math.huge then return 0 end
         return math.min(value, 4)
     end
-    return math.clamp(number(fire.fireDelay) + number(fire.boltDelay) + 0.15, 0.24, 5)
+    local speed = Auto.speedMultiplier()
+    return math.clamp(number(fire.fireDelay) + number(fire.boltDelay) + 0.15 / speed, 0.12, 5)
 end
 
 function Auto.start(tool, config, now)
@@ -24789,7 +25008,7 @@ function Auto.start(tool, config, now)
     Auto.releaseInput = useMouse and mouse1release or nil
     Auto.shotsAtPress = Auto.shots
     Auto.releaseAt = now + duration
-    Auto.nextPress = Auto.releaseAt + 0.06
+    Auto.nextPress = Auto.releaseAt + 0.06 / Auto.speedMultiplier()
     local ok, result
     if useMouse then
         ok, result = pcall(mouse1press)
@@ -24824,6 +25043,8 @@ function Auto.step()
         return
     end
     local now = os.clock()
+    local speed = Auto.speedMultiplier()
+    local reactionGap = 0.06 / speed
     if Reload.isReloading(tool, character) then
         Auto.release(false)
         return
@@ -24847,24 +25068,24 @@ function Auto.step()
         local recentlyFired = Auto.lastShotAt and now - Auto.lastShotAt <= math.max(0.35, math.min(gap * 2 + 0.2, 5))
         if Auto.shots - Auto.shotsAtPress >= 2 and recentlyFired then
             Auto.releaseAt = now + 0.2
-            Auto.nextPress = Auto.releaseAt + 0.06
+            Auto.nextPress = Auto.releaseAt + reactionGap
         else
             Auto.release(true)
-            Auto.nextPress = math.max(Auto.nextPress, now + 0.06)
+            Auto.nextPress = math.max(Auto.nextPress, now + reactionGap)
         end
     end
     if now < Auto.nextCheck then return end
-    Auto.nextCheck = now + 0.08
+    Auto.nextCheck = now + math.clamp(0.05 / speed, 0.015, 0.08)
     local origin = Silent.muzzle(tool, config)
     if not origin then
         Auto.release(false)
-        Auto.nextPress = now + 0.1
+        Auto.nextPress = now + 0.1 / speed
         return
     end
     local direction, target = Silent.choose(origin, config, true)
     if not direction or not target then
         Auto.release(false)
-        Auto.nextPress = now + 0.1
+        Auto.nextPress = now + 0.1 / speed
         return
     end
     if not Auto.held and now >= Auto.nextPress then Auto.start(tool, config, now) end
@@ -25349,6 +25570,15 @@ function App.set(key, value)
         Reload.reset()
     elseif key == "fullbright" and not cleaned then
         Guard.clear("light")
+    elseif key == "thirdPerson" then
+        if cleaned then
+            View.apply()
+        else
+            View.restore()
+        end
+    elseif key == "bossTelegraphs" and not cleaned then
+        Visual.clearTelegraphs()
+        pcall(Visual.update)
     elseif key == "noFog" and not cleaned then
         Guard.clear("fog")
     elseif key == "fovEnabled" and not cleaned then
@@ -25367,11 +25597,11 @@ function App.set(key, value)
     if (key == "speedEnabled" or key == "stamina" or key == "antiStagger" or key == "noSlow" or key == "fastReload") and cleaned or key == "speed" and settings.speedEnabled or (key == "felsiReload" or key == "squadReload") and settings.fastReload then
         Motion.updateProperties()
     end
-    if key == "aimMode" or key == "aimRadius" or key == "shieldPenetration" then
+    if key == "aimMode" or key == "aimRadius" or key == "shieldPenetration" or key == "aimSmart" or key == "autoFireSpeed" then
         Silent.target = nil
         Silent.nextTargetScan = 0
     end
-    if key == "espPlayers" or key == "espAllies" or key == "espNPC" or key == "espBoss" or key == "mobColor" or key == "bossColor" or key == "espObjectives" or key == "espPickups" then
+    if key == "espPlayers" or key == "espAllies" or key == "espNPC" or key == "espBoss" or key == "mobColor" or key == "bossColor" or key == "espObjectives" or key == "espPickups" or key == "bossTelegraphs" then
         local ok = pcall(Visual.update)
         if not ok then
             App.notice("ESP: update failed")
@@ -25563,7 +25793,9 @@ function UI.build()
     local aim = combatPage:CreateGroupbox({Name = "Aim And Fire", Side = "Left"})
     UI.addToggle(aim, "silentAim", "Silent Aim")
     UI.addToggle(aim, "autoFire", "Smart Auto Fire")
+    UI.addSlider(aim, "autoFireSpeed", "Auto Fire Speed", "%")
     UI.addToggle(aim, "shieldPenetration", "Zombie Shield Bypass")
+    UI.addToggle(aim, "aimSmart", "Threat Priority (Smart Target)")
     UI.addChoice(aim, "aimMode", "FOV Mode")
     UI.addToggle(aim, "showAimFov", "Show Camera FOV")
     UI.addSlider(aim, "aimRadius", "Camera Aim FOV", "°")
@@ -25589,6 +25821,7 @@ function UI.build()
     UI.addColor(esp, "mobColor", "Mob Color")
     UI.addToggle(esp, "espBoss", "Boss ESP")
     UI.addColor(esp, "bossColor", "Boss Color")
+    UI.addToggle(esp, "bossTelegraphs", "Boss Telegraph Flash")
     UI.addToggle(esp, "espObjectives", "Objective ESP")
     UI.addToggle(esp, "espPickups", "Pickup ESP")
     UI.addSlider(esp, "espDistance", "ESP Distance")
@@ -25611,10 +25844,10 @@ function UI.build()
     UI.addToggle(move, "antiStagger", "Anti Stagger")
     UI.addToggle(move, "noSlow", "No Slow")
     UI.addToggle(move, "noclip", "Noclip")
-    local world = miscPage:CreateGroupbox({Name = "World and Teleports", Side = "Right"})
+    local viewGroup = miscPage:CreateGroupbox({Name = "View", Side = "Left"})
+    UI.addToggle(viewGroup, "thirdPerson", "Third Person View")
+    local world = miscPage:CreateGroupbox({Name = "World", Side = "Right"})
     UI.addToggle(world, "instantPrompt", "Instant Interactions")
-    world:Button({Name = "Teleport to Nearest Objective", Callback = World.teleportNearestObjective})
-    world:Button({Name = "Teleport to Nearest Pickup", Callback = World.teleportNearestPickup})
     world:Button({Name = "Save Current Position", Callback = World.savePosition})
     world:Button({Name = "Return to Saved Position", Callback = World.returnPosition})
     local performance = miscPage:CreateGroupbox({Name = "Performance", Side = "Right"})
@@ -26018,7 +26251,7 @@ App.connect(Lighting.ChildRemoved, function(child)
     end
 end)
 
-local elapsed = {weapon = 0, esp = 0, lighting = 0, prompt = 0, quest = 0, fps = 0, optimization = 0, motion = 0, drawing = 0}
+local elapsed = {weapon = 0, esp = 0, lighting = 0, prompt = 0, quest = 0, fps = 0, optimization = 0, motion = 0, drawing = 0, telegraph = 0}
 App.connect(RunService.Stepped, function()
     if App.alive and (settings.noclip or Guard.groups.noclip) then
         App.safe("Noclip", Motion.updateNoclip)
@@ -26034,6 +26267,13 @@ App.connect(RunService.Heartbeat, function(delta)
     end
     if settings.autoPunch then
         App.safe("Auto Punch", Punch.step)
+    end
+    elapsed.telegraph += delta
+    if elapsed.telegraph >= 0.25 then
+        elapsed.telegraph = 0
+        if settings.bossTelegraphs then
+            App.safe("Telegraphs", Visual.syncTelegraphLinks)
+        end
     end
     if settings.autoFire and settings.silentAim or Auto.held then
         if not App.safe("Auto Fire", Auto.step) then
@@ -26106,6 +26346,9 @@ RunService:BindToRenderStep(App.renderName, Enum.RenderPriority.Last.Value, func
     if not App.alive then
         return
     end
+    if settings.bossTelegraphs then
+        App.safe("Boss telegraphs", Visual.pulseTelegraphs)
+    end
     if UI.open and UserInputService.MouseEnabled then
         Guard.set("cursor", UserInputService, "MouseIconEnabled", true, false)
     elseif Guard.groups.cursor then
@@ -26161,6 +26404,7 @@ function App.stop()
         RunService:UnbindFromRenderStep(App.renderName)
     end)
     Motion.disconnectCharacter()
+    pcall(View.restore)
     Combat.clearWeapon()
     Guard.clearAll()
     Visual.clearAll()
@@ -26197,8 +26441,6 @@ App.api = {
     end,
     Action = function(action)
         local actions = {
-            objective = World.teleportNearestObjective,
-            pickup = World.teleportNearestPickup,
             savePosition = World.savePosition,
             returnPosition = World.returnPosition,
             reset = App.reset,
