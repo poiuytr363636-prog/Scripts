@@ -21562,9 +21562,51 @@ local Reload = {
     stateNames = {"AmmoState", "WeaponState", "State", "Stats", "Ammunition"},
     ambiguousNames = {"Ammo", "ammo", "Clip", "Magazine"},
 }
+
+local Tracer = {folder = nil}
+
+function Tracer.getFolder()
+    if not Tracer.folder or not Tracer.folder.Parent then
+        local f = Instance.new("Folder")
+        f.Name = "HallowedTracers"
+        local cam = Workspace.CurrentCamera
+        if cam then f.Parent = cam end
+        Tracer.folder = f
+    end
+    return Tracer.folder
+end
+
+function Tracer.draw(origin, target)
+    if typeof(origin) ~= "Vector3" or typeof(target) ~= "Vector3" then return end
+    
+    local dist = (target - origin).Magnitude
+    if dist < 1 then return end
+    
+    local part = Instance.new("Part")
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanQuery = false
+    part.Material = Enum.Material.Neon
+    part.Color = Color3.fromRGB(255, 158, 200)
+    part.Size = Vector3.new(0.1, 0.1, dist)
+    part.CFrame = CFrame.lookAt(origin + (target - origin) / 2, target)
+    
+    part.Transparency = 0.5 
+    part.Parent = Tracer.getFolder()
+    
+    task.delay(2, function()
+        if part and part.Parent then
+            local tween = game:GetService("TweenService"):Create(part, TweenInfo.new(0.5, Enum.EasingStyle.Linear), {Transparency = 1})
+            tween:Play()
+            task.delay(0.5, function()
+                part:Destroy()
+            end)
+        end
+    end)
+end
+
 local Punch = {nextCheck = 0, nextAttempt = 0, target = nil, targetAt = nil, kickAt = nil, kickDeadline = nil}
 local AutoSwing = {nextCheck = 0, nextAttempt = 0, currentTarget = nil}
-local Tracer = {folder = nil}
 local Qte = {connection = nil, busy = false}
 local Visual = {characters = {}, pickups = {}, objectives = {}, accumulator = 0, telegraphs = {}, telegraphLinks = {}, telegraphAttackColor = Color3.fromRGB(255, 170, 40), telegraphEscapeColor = Color3.fromRGB(190, 120, 255)}
 local World = {shownPrompts = {}}
@@ -21856,15 +21898,15 @@ local defaults = {
     autoReload = false,
     reloadKey = "R",
     autoPunch = false,
-    autoSwingMelee = false,
     bulletTracer = false,
+    autoSwingMelee = false,
+    removeShield = false,
     punchRange = 8,
     punchKey = "G",
     punchLowHpOnly = false,
     punchDelay = 50,
     autoQte = false,
     qteDelay = 300,
-    shieldPenetration = true,
     aimSmart = true,
     autoFireSpeed = 100,
     aimMode = "Camera",
@@ -24235,6 +24277,27 @@ function World.inAimFov(position)
     return angle <= fov * 0.5
 end
 
+function World.removeShields()
+    local characters = Workspace:FindFirstChild("Characters")
+    if not characters then return end
+    
+    for _, model in ipairs(characters:GetChildren()) do
+        if World.isZombie(model) then
+            for _, part in ipairs(model:GetDescendants()) do
+                if part:IsA("BasePart") then
+                    local name = string.lower(part.Name)
+                    if string.find(name, "shield", 1, true) or part:GetAttribute("RiotShieldPart") == true then
+                        part.CanQuery = false
+                        part.CanCollide = false
+                        part.Transparency = 1 
+                        part.LocalTransparencyModifier = 1
+                    end
+                end
+            end
+        end
+    end
+end
+
 function World.hasZombieShield(model)
     if not model or not model:IsA("Model") or not World.isZombie(model) then return false end
     if World.isShielderArchive(model) then return true end
@@ -24335,7 +24398,7 @@ function World.scoreTarget(model, position, origin, retained)
     if World.isBoss(model) then
         score = score - 60
     end
-    if World.hasZombieShield(model) and not settings.shieldPenetration then
+    if World.hasZombieShield(model) then
         score = score + 150
     end
     if retained == model then
@@ -24608,7 +24671,6 @@ function Silent.wrapNetwork(record, self, name, ...)
             args[3] = direction
             shot.direction = direction
             shot.target = target
-            shot.shieldPass = settings.shieldPenetration and World.hasZombieShield(target) or false
             shot.cast = Silent.pairCast
         end
     end
@@ -24620,8 +24682,10 @@ function Silent.wrapNetwork(record, self, name, ...)
             local params = RaycastParams.new()
             params.FilterType = Enum.RaycastFilterType.Exclude
             params.FilterDescendantsInstances = {LocalPlayer.Character, Workspace.CurrentCamera}
+            
             local hit = Workspace:Raycast(muzzle, dir * 1000, params)
             local target = hit and hit.Position or (muzzle + dir * 1000)
+            
             Tracer.draw(muzzle, target)
         end
     end
@@ -24663,39 +24727,6 @@ function Silent.wrapCast(record, caster, ...)
         Silent.liveAcceleration = typeof(acceleration) == "Vector3" and World.validPosition(acceleration) and acceleration or nil
         local maxDistance = tonumber(behavior.MaxDistance)
         Silent.liveMaxDistance = maxDistance and maxDistance == maxDistance and maxDistance > 0 and maxDistance < math.huge and maxDistance or nil
-        if shot.shieldPass and type(behavior) == "table" then
-            local state = rawget(behavior, "__hubShieldPierce")
-            if type(state) ~= "table" then
-                state = {original = rawget(behavior, "CanPierceFunction"), shot = nil, expires = 0}
-                state.wrapper = function(pa, pb, pc, pd)
-                    local originalPierce = state.original
-                    local callOk, result = true, false
-                    if type(originalPierce) == "function" then
-                        callOk, result = pcall(originalPierce, pa, pb, pc, pd)
-                    end
-                    if callOk and result == true then
-                        return true
-                    end
-                    local activeShot = state.shot
-                    local hitInstance = type(pb) == "table" and pb.Instance or nil
-                    if activeShot and os.clock() <= state.expires and typeof(hitInstance) == "Instance" and World.isZombieShieldPart(hitInstance, activeShot.target) then
-                        return true
-                    end
-                    return callOk and result or false
-                end
-                local installed = pcall(function()
-                    behavior.CanPierceFunction = state.wrapper
-                    behavior.__hubShieldPierce = state
-                end)
-                if not installed then
-                    state = nil
-                end
-            end
-            if type(state) == "table" then
-                state.shot = shot
-                state.expires = now + 0.5
-            end
-        end
         if shot.direction and shot.cast == record then
             args[2] = shot.direction
             if typeof(velocity) == "Vector3" then args[3] = shot.direction * actualSpeed end
@@ -25645,7 +25676,7 @@ function AutoSwing.step()
             pcall(function() tool:Activate() end)
         end
 
-        AutoSwing.nextAttempt = now + 0.33
+        AutoSwing.nextAttempt = now + 0.45
         AutoSwing.currentTarget = closestTarget
     end
 end
@@ -25672,43 +25703,6 @@ function Qte.pressKey(key)
         end
     end
     return false
-end
-
-function Tracer.getFolder()
-    if not Tracer.folder or not Tracer.folder.Parent then
-        local f = Instance.new("Folder")
-        f.Name = "HallowedTracers"
-        local cam = Workspace.CurrentCamera
-        if cam then f.Parent = cam end
-        Tracer.folder = f
-    end
-    return Tracer.folder
-end
-
-function Tracer.draw(origin, target)
-    local dist = (target - origin).Magnitude
-    if dist < 1 then return end
-    
-    local part = Instance.new("Part")
-    part.Anchored = true
-    part.CanCollide = false
-    part.CanQuery = false
-    part.Material = Enum.Material.Neon
-    part.Color = Color3.fromRGB(255, 158, 200)
-    part.Size = Vector3.new(0.1, 0.1, dist)
-    part.CFrame = CFrame.lookAt(origin + (target - origin) / 2, target)
-    part.Transparency = 0.4
-    part.Parent = Tracer.getFolder()
-    
-    task.delay(2.5, function()
-        if part and part.Parent then
-            local tween = game:GetService("TweenService"):Create(part, TweenInfo.new(0.5, Enum.EasingStyle.Linear), {Transparency = 1})
-            tween:Play()
-            task.delay(0.5, function()
-                part:Destroy()
-            end)
-        end
-    end)
 end
 
 function Qte.handle()
@@ -25839,6 +25833,7 @@ function App.set(key, value)
         Punch.target, Punch.targetAt, Punch.kickAt, Punch.kickDeadline = nil, nil, nil, nil
     elseif key == "autoSwingMelee" and not cleaned then
         AutoSwing.currentTarget, AutoSwing.nextAttempt = nil, 0
+    elseif key == "removeShield" and not cleaned then
     elseif key == "autoFire" then
         Auto.reset()
     elseif key == "autoReload" and not cleaned then
@@ -25865,7 +25860,7 @@ function App.set(key, value)
         Combat.applyPatches()
         Combat.update()
         if not Combat.hooksWanted() then Silent.requestStop() end
-    elseif key == "silentAim" or key == "autoReload" or key == "autoPunch" or key == "shieldPenetration" then
+    elseif key == "silentAim" or key == "autoReload" or key == "autoPunch" then
         Combat.update()
         if not Combat.hooksWanted() then Silent.requestStop() end
     end
@@ -26069,7 +26064,7 @@ function UI.build()
     UI.addToggle(aim, "silentAim", "Silent Aim")
     UI.addToggle(aim, "autoFire", "Smart Auto Fire")
     UI.addSlider(aim, "autoFireSpeed", "Auto Fire Speed", "%")
-    UI.addToggle(aim, "shieldPenetration", "Zombie Shield Bypass")
+
     UI.addToggle(aim, "aimSmart", "Threat Priority (Smart Target)")
     UI.addChoice(aim, "aimMode", "FOV Mode")
     UI.addToggle(aim, "showAimFov", "Show Camera FOV")
@@ -26100,6 +26095,16 @@ function UI.build()
     swingGroup:Label("Swing for those who are lazy")
     swingGroup:Label("Can parry if Slasher hit")
 
+    local utilityGroup = combatPage:CreateGroupbox({Name = "Utility", Side = "Right"})
+    UI.addToggle(utilityGroup, "removeShield", "Always Remove Shielder's Shield")
+    utilityGroup:Button({
+        Name = "Remove Shields",
+        Callback = function()
+            World.removeShields()
+            App.notice("Shields removed")
+        end
+    })
+
     local esp = visualsPage:CreateGroupbox({Name = "ESP", Side = "Left"})
     UI.addToggle(esp, "espPlayers", "Player ESP")
     UI.addToggle(esp, "espAllies", "Ally ESP")
@@ -26120,6 +26125,7 @@ function UI.build()
     UI.addSlider(visual, "fov", "Field of View")
     UI.addToggle(visual, "crosshair", "Center Crosshair")
     UI.addToggle(visual, "fps", "Show FPS")
+
     local trackers = visualsPage:CreateGroupbox({Name = "Trackers", Side = "Right"})
     UI.addToggle(trackers, "eventTracker", "Post-Game Event Tracker")
     UI.addToggle(trackers, "threatTracker", "Nearby Threat Tracker")
@@ -26612,6 +26618,9 @@ App.connect(RunService.Heartbeat, function(delta)
     end
     if elapsed.esp >= 0.5 then
         elapsed.esp = 0
+        if settings.removeShield then
+            App.safe("Remove Shields", World.removeShields)
+        end
         if settings.espPlayers or settings.espAllies or settings.espNPC or settings.espBoss or settings.espPickups or settings.espObjectives or next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
             App.safe("ESP", Visual.update)
         end
