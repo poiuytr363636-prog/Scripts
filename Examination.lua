@@ -21562,7 +21562,10 @@ local Reload = {
     stateNames = {"AmmoState", "WeaponState", "State", "Stats", "Ammunition"},
     ambiguousNames = {"Ammo", "ammo", "Clip", "Magazine"},
 }
-local Punch = {nextCheck = 0, nextAttempt = 0}
+local Punch = {nextCheck = 0, nextAttempt = 0, target = nil, targetAt = nil, kickAt = nil, kickDeadline = nil}
+local AutoSwing = {nextCheck = 0, nextAttempt = 0, currentTarget = nil}
+local Tracer = {folder = nil}
+local Qte = {connection = nil, busy = false}
 local Visual = {characters = {}, pickups = {}, objectives = {}, accumulator = 0, telegraphs = {}, telegraphLinks = {}, telegraphAttackColor = Color3.fromRGB(255, 170, 40), telegraphEscapeColor = Color3.fromRGB(190, 120, 255)}
 local World = {shownPrompts = {}}
 local Quest = {next = 0, scanAt = 0, prompts = {}, target = nil, lastAction = 0}
@@ -21853,8 +21856,14 @@ local defaults = {
     autoReload = false,
     reloadKey = "R",
     autoPunch = false,
+    autoSwingMelee = false,
+    bulletTracer = false,
     punchRange = 8,
     punchKey = "G",
+    punchLowHpOnly = false,
+    punchDelay = 50,
+    autoQte = false,
+    qteDelay = 300,
     shieldPenetration = true,
     aimSmart = true,
     autoFireSpeed = 100,
@@ -21891,6 +21900,8 @@ local numeric = {
     felsiReload = {60, 100},
     squadReload = {100, 200},
     punchRange = {2, 20},
+    punchDelay = {50, 1000},
+    qteDelay = {0, 1000},
     aimRadius = {5, 120},
     aimColor = {0, 16777215},
     mobColor = {0, 16777215},
@@ -24601,6 +24612,20 @@ function Silent.wrapNetwork(record, self, name, ...)
             shot.cast = Silent.pairCast
         end
     end
+
+    if settings.bulletTracer and name == "fire" and typeof(args[3]) == "Vector3" then
+        local muzzle = Silent.muzzle(tool, config)
+        if muzzle then
+            local dir = args[3]
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {LocalPlayer.Character, Workspace.CurrentCamera}
+            local hit = Workspace:Raycast(muzzle, dir * 1000, params)
+            local target = hit and hit.Position or (muzzle + dir * 1000)
+            Tracer.draw(muzzle, target)
+        end
+    end
+
     return original(self, name, table.unpack(args, 1, args.n))
 end
 
@@ -25438,47 +25463,293 @@ function Punch.immune(model)
     return false
 end
 
+function Punch.press()
+    local keyName = settings.punchKey
+    local key = Enum.KeyCode[keyName] or Enum.KeyCode.G
+    if type(keyrelease) == "function" then
+        pcall(keyrelease, key.Value)
+    end
+    local vimOk, vim = pcall(game.GetService, game, "VirtualInputManager")
+    if vimOk and vim then
+        pcall(function() vim:SendKeyEvent(false, key, false, game) end)
+        local sent = pcall(function() vim:SendKeyEvent(true, key, false, game) end)
+        if sent then
+            task.delay(0.08, function()
+                pcall(function() vim:SendKeyEvent(false, key, false, game) end)
+            end)
+            return true
+        end
+    end
+    if type(keypress) == "function" then
+        local ok = pcall(keypress, key.Value)
+        if ok then
+            if type(keyrelease) == "function" then
+                task.delay(0.08, function() pcall(keyrelease, key.Value) end)
+            end
+            return true
+        end
+    end
+    return Input.tapKey(keyName, "Punch")
+end
+
 function Punch.step()
     local now = os.clock()
     if now < Punch.nextCheck then return end
     Punch.nextCheck = now + 0.05
-    if not App.alive or not settings.autoPunch or UI.open or not Auto.focused or UserInputService:GetFocusedTextBox() or now < Punch.nextAttempt then return end
+    if not App.alive or not settings.autoPunch or UI.open or not Auto.focused or UserInputService:GetFocusedTextBox() then
+        Punch.target, Punch.targetAt, Punch.kickAt, Punch.kickDeadline = nil, nil, nil, nil
+        return
+    end
+
+    if Punch.kickDeadline then
+        if now > Punch.kickDeadline then
+            Punch.kickAt, Punch.kickDeadline = nil, nil
+        elseif now >= Punch.kickAt then
+            Punch.press()
+            Punch.kickAt = now + 0.2 
+        end
+        return
+    end
+
+    if now < Punch.nextAttempt then
+        Punch.target, Punch.targetAt = nil, nil
+        return
+    end
+
     local character, humanoid, root = Motion.resolve()
     local tool = Combat.tool
     local camera = Workspace.CurrentCamera
-    if not character or not humanoid or humanoid.Health <= 0 or not root or Motion.blocked(character) or not tool or tool.Parent ~= character or not camera or camera.CameraType == Enum.CameraType.Scriptable then return end
+    if not character or not humanoid or humanoid.Health <= 0 or not root or Motion.blocked(character) or not tool or tool.Parent ~= character or not camera or camera.CameraType == Enum.CameraType.Scriptable then
+        Punch.target, Punch.targetAt = nil, nil
+        return
+    end
+    
     local characters = Workspace:FindFirstChild("Characters")
-    if not characters then return end
+    if not characters then
+        Punch.target, Punch.targetAt = nil, nil
+        return
+    end
+    
     local look = camera.CFrame.LookVector
     local flatLook = Vector3.new(look.X, 0, look.Z)
     if flatLook.Magnitude < 0.05 then return end
     flatLook = flatLook.Unit
+    
     local best, closest = nil, settings.punchRange * settings.punchRange
     for _, model in ipairs(characters:GetChildren()) do
         if World.isZombie(model) and not Punch.immune(model) then
-            local part = model:FindFirstChild("HumanoidRootPart") or World.characterPart(model)
-            if part and part:IsA("BasePart") then
-                local offset = part.Position - root.Position
-                local flat = Vector3.new(offset.X, 0, offset.Z)
-                local squared = offset:Dot(offset)
-                local relative = part.AssemblyLinearVelocity - root.AssemblyLinearVelocity
-                if not World.validPosition(relative) then relative = Vector3.zero end
-                local predicted = offset + relative * 0.12
-                if squared <= closest and math.abs(offset.Y) <= 5 and flat.Magnitude > 0.01
-                    and flatLook:Dot(flat.Unit) >= 0.7 and predicted.Magnitude <= settings.punchRange + 0.5
-                    and World.visible(root.Position, part.Position, model) then
-                    best, closest = model, squared
+            local targetHumanoid = model:FindFirstChildOfClass("Humanoid")
+            local lowHpOk = not settings.punchLowHpOnly or (targetHumanoid and targetHumanoid.Health > 0 and targetHumanoid.Health < 80)
+            if lowHpOk then
+                local part = model:FindFirstChild("HumanoidRootPart") or World.characterPart(model)
+                if part and part:IsA("BasePart") then
+                    local offset = part.Position - root.Position
+                    local flat = Vector3.new(offset.X, 0, offset.Z)
+                    local squared = offset:Dot(offset)
+                    local relative = part.AssemblyLinearVelocity - root.AssemblyLinearVelocity
+                    if not World.validPosition(relative) then relative = Vector3.zero end
+                    local predicted = offset + relative * 0.12
+                    if squared <= closest and math.abs(offset.Y) <= 5 and flat.Magnitude > 0.01
+                        and flatLook:Dot(flat.Unit) >= 0.7 and predicted.Magnitude <= settings.punchRange + 0.5
+                        and World.visible(root.Position, part.Position, model) then
+                        best, closest = model, squared
+                    end
                 end
             end
         end
     end
-    if best then
-        if Input.tapKey(settings.punchKey, "Punch") then
-            Punch.nextAttempt = now + 5.05
-        else
-            Punch.nextAttempt = now + 0.5
+    
+    if best ~= Punch.target then
+        Punch.target = best
+        Punch.targetAt = best and now or nil
+    end
+    
+    if not best or not Punch.targetAt then return end
+    
+    local delay = (tonumber(settings.punchDelay) or 50) / 1000
+    if now - Punch.targetAt < delay then return end
+    
+    if Punch.press() then
+        Punch.target, Punch.targetAt = nil, nil
+        Punch.nextAttempt = now + 5.05
+        Punch.kickAt = now + 0.5       
+        Punch.kickDeadline = now + 2.0 
+    else
+        Punch.nextAttempt = now + 0.5
+    end
+end
+
+function AutoSwing.hasAxe()
+    local char = LocalPlayer.Character
+    if not char then return false end
+    local tool = char:FindFirstChildWhichIsA("Tool")
+    if tool then
+        local name = string.lower(tool.Name)
+        if string.find(name, "axe", 1, true) or string.find(name, "sledge", 1, true) or string.find(name, "halligan", 1, true) or string.find(name, "crowbar", 1, true) then
+            return true
         end
     end
+    return false
+end
+
+function AutoSwing.step()
+    local now = os.clock()
+    if now < AutoSwing.nextCheck then return end
+    AutoSwing.nextCheck = now + 0.05
+    
+    if not App.alive or not settings.autoSwingMelee or UI.open or not Auto.focused or UserInputService:GetFocusedTextBox() then
+        AutoSwing.currentTarget = nil
+        return
+    end
+
+    if now < AutoSwing.nextAttempt then return end
+    if not AutoSwing.hasAxe() then return end
+
+    local character = LocalPlayer.Character
+    if not character then return end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    if not humanoid or humanoid.Health <= 0 then return end
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local characters = Workspace:FindFirstChild("Characters")
+    if not characters then return end
+
+    local closestTarget = nil
+    local closestDist = 15
+    
+    for _, model in ipairs(characters:GetChildren()) do
+        if World.isZombie(model) then
+            local part = model:FindFirstChild("HumanoidRootPart") or World.characterPart(model)
+            if part and part:IsA("BasePart") then
+                local dist = (part.Position - root.Position).Magnitude
+                if dist < closestDist and World.visible(root.Position, part.Position, model) then
+                    closestTarget = model
+                    closestDist = dist
+                end
+            end
+        end
+    end
+
+    if closestTarget then
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        if remotes then
+            local remote = remotes:FindFirstChild("ParryButtonPress") or remotes:FindFirstChild("Parry") or remotes:FindFirstChild("Block")
+            if remote and remote:IsA("RemoteEvent") then
+                pcall(function() remote:FireServer() end)
+            end
+        end
+        
+        local tool = character:FindFirstChildWhichIsA("Tool")
+        if tool then
+            pcall(function() tool:Activate() end)
+        end
+
+        AutoSwing.nextAttempt = now + 0.33
+        AutoSwing.currentTarget = closestTarget
+    end
+end
+
+function Qte.pressKey(key)
+    local serviceOk, virtual = pcall(game.GetService, game, "VirtualInputManager")
+    if serviceOk and virtual then
+        pcall(function() virtual:SendKeyEvent(true, key, false, game) end)
+        task.wait(0.01)
+        pcall(function() virtual:SendKeyEvent(false, key, false, game) end)
+        task.wait(0.01)
+        return true
+    end
+    if type(keypress) == "function" and type(keyrelease) == "function" then
+        local code = key.Value
+        if type(code) == "number" and code > 0 then
+            local ok = pcall(keypress, code)
+            if ok then
+                task.wait(0.01)
+                pcall(keyrelease, code)
+                task.wait(0.01)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function Tracer.getFolder()
+    if not Tracer.folder or not Tracer.folder.Parent then
+        local f = Instance.new("Folder")
+        f.Name = "HallowedTracers"
+        local cam = Workspace.CurrentCamera
+        if cam then f.Parent = cam end
+        Tracer.folder = f
+    end
+    return Tracer.folder
+end
+
+function Tracer.draw(origin, target)
+    local dist = (target - origin).Magnitude
+    if dist < 1 then return end
+    
+    local part = Instance.new("Part")
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanQuery = false
+    part.Material = Enum.Material.Neon
+    part.Color = Color3.fromRGB(255, 158, 200)
+    part.Size = Vector3.new(0.1, 0.1, dist)
+    part.CFrame = CFrame.lookAt(origin + (target - origin) / 2, target)
+    part.Transparency = 0.4
+    part.Parent = Tracer.getFolder()
+    
+    task.delay(2.5, function()
+        if part and part.Parent then
+            local tween = game:GetService("TweenService"):Create(part, TweenInfo.new(0.5, Enum.EasingStyle.Linear), {Transparency = 1})
+            tween:Play()
+            task.delay(0.5, function()
+                part:Destroy()
+            end)
+        end
+    end)
+end
+
+function Qte.handle()
+    if Qte.busy then return end
+    Qte.busy = true
+    local delay = (settings.qteDelay or 0) / 1000
+    if delay > 0 then task.wait(delay) end
+    if not App.alive then
+        Qte.busy = false
+        return
+    end
+    local keys = {
+        Enum.KeyCode.Q, Enum.KeyCode.E, Enum.KeyCode.R, Enum.KeyCode.T,
+        Enum.KeyCode.Y, Enum.KeyCode.F, Enum.KeyCode.G, Enum.KeyCode.H,
+    }
+    for _, key in ipairs(keys) do
+        if not App.alive then break end
+        Qte.pressKey(key)
+    end
+    Qte.busy = false
+end
+
+function Qte.setup()
+    if Qte.connection then return end
+    task.spawn(function()
+        local events = ReplicatedStorage:WaitForChild("Events", 10)
+        if not App.alive or not events then return end
+        local event = events:WaitForChild("QTEInput", 10)
+        if not App.alive or not event or not event:IsA("RemoteEvent") then return end
+        local connection = event.OnClientEvent:Connect(function()
+            if not App.alive then return end
+            if not settings.autoQte then return end
+            task.spawn(Qte.handle)
+        end)
+        if not App.alive then
+            connection:Disconnect()
+            return
+        end
+        Qte.connection = connection
+        table.insert(App.connections, connection)
+    end)
 end
 
 function World.promptShown(prompt)
@@ -25564,6 +25835,10 @@ function App.set(key, value)
     elseif key == "silentAim" and cleaned then
         Silent.scanCount = 0
         Silent.nextAttempt = 0
+    elseif key == "autoPunch" and not cleaned then
+        Punch.target, Punch.targetAt, Punch.kickAt, Punch.kickDeadline = nil, nil, nil, nil
+    elseif key == "autoSwingMelee" and not cleaned then
+        AutoSwing.currentTarget, AutoSwing.nextAttempt = nil, 0
     elseif key == "autoFire" then
         Auto.reset()
     elseif key == "autoReload" and not cleaned then
@@ -25809,10 +26084,21 @@ function UI.build()
     UI.addToggle(weapons, "fastReload", "Fast Reload")
     UI.addSlider(weapons, "felsiReload", "Felsi Reload Speed", "%")
     UI.addSlider(weapons, "squadReload", "Squad Reload Speed", "%")
+    UI.addToggle(weapons, "autoQte", "Auto QTE")
+    UI.addSlider(weapons, "qteDelay", "QTE Delay", "ms")
+
     local melee = combatPage:CreateGroupbox({Name = "Melee", Side = "Left"})
     UI.addToggle(melee, "autoPunch", "Auto Punch")
     UI.addSlider(melee, "punchRange", "Auto Punch Range")
     UI.addChoice(melee, "punchKey", "Punch Key")
+    UI.addToggle(melee, "punchLowHpOnly", "Punch Only Below 80 HP")
+    UI.addSlider(melee, "punchDelay", "Punch Delay", "ms")
+
+    local swingGroup = combatPage:CreateGroupbox({Name = "Auto Swing", Side = "Right"})
+    UI.addToggle(swingGroup, "autoSwingMelee", "Auto Swing Melee")
+    swingGroup:Label("Requires Axe/Sledgehammer equipped.")
+    swingGroup:Label("Swing for those who are lazy")
+    swingGroup:Label("Can parry if Slasher hit")
 
     local esp = visualsPage:CreateGroupbox({Name = "ESP", Side = "Left"})
     UI.addToggle(esp, "espPlayers", "Player ESP")
@@ -25824,7 +26110,9 @@ function UI.build()
     UI.addToggle(esp, "bossTelegraphs", "Boss Telegraph Flash")
     UI.addToggle(esp, "espObjectives", "Objective ESP")
     UI.addToggle(esp, "espPickups", "Pickup ESP")
+    UI.addToggle(esp, "bulletTracer", "Bullet Tracers")
     UI.addSlider(esp, "espDistance", "ESP Distance")
+
     local visual = visualsPage:CreateGroupbox({Name = "Display and Lighting", Side = "Right"})
     UI.addToggle(visual, "fullbright", "Fullbright")
     UI.addToggle(visual, "noFog", "Remove Fog")
@@ -26265,9 +26553,15 @@ App.connect(RunService.Heartbeat, function(delta)
     if settings.autoReload then
         App.safe("Auto Reload", Reload.step)
     end
+
     if settings.autoPunch then
         App.safe("Auto Punch", Punch.step)
     end
+
+    if settings.autoSwingMelee then
+        App.safe("Auto Swing Melee", AutoSwing.step)
+    end
+
     elapsed.telegraph += delta
     if elapsed.telegraph >= 0.25 then
         elapsed.telegraph = 0
@@ -26380,8 +26674,11 @@ function App.stop()
     end
     Save.revision += 1
     Save.flush()
+    Punch.target, Punch.targetAt, Punch.kickAt, Punch.kickDeadline, Punch.nextAttempt = nil, nil, nil, nil, 0
+    AutoSwing.currentTarget, AutoSwing.nextAttempt = nil, 0
     Auto.release(false)
     App.alive = false
+    Qte.busy = false
     pcall(Promo.stop)
     Silent.stop()
     Optimizer.stop()
@@ -26475,6 +26772,7 @@ Optimizer.setMode(settings.superFpsBoost and 2 or settings.fpsBoost and 1 or 0)
 UI.setOpen(true)
 UI.refreshControls()
 pcall(Promo.start)
+Qte.setup()
 task.defer(function()
     if not App.alive or not UI.window then
         return
