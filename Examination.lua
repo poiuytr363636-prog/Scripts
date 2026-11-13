@@ -21562,49 +21562,8 @@ local Reload = {
     stateNames = {"AmmoState", "WeaponState", "State", "Stats", "Ammunition"},
     ambiguousNames = {"Ammo", "ammo", "Clip", "Magazine"},
 }
-
 local Tracer = {folder = nil}
-
-function Tracer.getFolder()
-    if not Tracer.folder or not Tracer.folder.Parent then
-        local f = Instance.new("Folder")
-        f.Name = "HallowedTracers"
-        local cam = Workspace.CurrentCamera
-        if cam then f.Parent = cam end
-        Tracer.folder = f
-    end
-    return Tracer.folder
-end
-
-function Tracer.draw(origin, target)
-    if typeof(origin) ~= "Vector3" or typeof(target) ~= "Vector3" then return end
-    
-    local dist = (target - origin).Magnitude
-    if dist < 1 then return end
-    
-    local part = Instance.new("Part")
-    part.Anchored = true
-    part.CanCollide = false
-    part.CanQuery = false
-    part.Material = Enum.Material.Neon
-    part.Color = Color3.fromRGB(255, 158, 200)
-    part.Size = Vector3.new(0.1, 0.1, dist)
-    part.CFrame = CFrame.lookAt(origin + (target - origin) / 2, target)
-    
-    part.Transparency = 0.5 
-    part.Parent = Tracer.getFolder()
-    
-    task.delay(2, function()
-        if part and part.Parent then
-            local tween = game:GetService("TweenService"):Create(part, TweenInfo.new(0.5, Enum.EasingStyle.Linear), {Transparency = 1})
-            tween:Play()
-            task.delay(0.5, function()
-                part:Destroy()
-            end)
-        end
-    end)
-end
-
+local BloodWipe = {nextCheck = 0, lastWipe = 0}
 local Punch = {nextCheck = 0, nextAttempt = 0, target = nil, targetAt = nil, kickAt = nil, kickDeadline = nil}
 local AutoSwing = {nextCheck = 0, nextAttempt = 0, currentTarget = nil}
 local Qte = {connection = nil, busy = false}
@@ -21905,6 +21864,7 @@ local defaults = {
     punchKey = "G",
     punchLowHpOnly = false,
     punchDelay = 50,
+    punchBackstab = false,
     autoQte = false,
     qteDelay = 300,
     aimSmart = true,
@@ -21926,6 +21886,7 @@ local defaults = {
     threatRange = 200,
     espDistance = 800,
     fullbright = false,
+    autoWipeBlood = false,
     noFog = false,
     fovEnabled = false,
     fov = 80,
@@ -24086,6 +24047,121 @@ function Visual.updateObjectives(origin)
     end
 end
 
+function Tracer.getFolder()
+    if not Tracer.folder or not Tracer.folder.Parent then
+        local f = Instance.new("Folder")
+        f.Name = "HallowedTracers"
+        local cam = Workspace.CurrentCamera
+        if cam then f.Parent = cam end
+        Tracer.folder = f
+    end
+    return Tracer.folder
+end
+
+function Tracer.draw(origin, target)
+    if typeof(origin) ~= "Vector3" or typeof(target) ~= "Vector3" then return end
+    
+    local dist = (target - origin).Magnitude
+    if dist < 1 then return end
+
+    -- Create a thin, stretched part
+    local part = Instance.new("Part")
+    part.Anchored = true
+    part.CanCollide = false
+    part.CanQuery = false
+    part.Material = Enum.Material.Neon
+    part.Color = Color3.fromRGB(255, 188, 229) -- Bright Phantom Forces Pink
+    part.Size = Vector3.new(0.15, 0.15, dist)
+    -- Position it exactly halfway between you and the target
+    part.CFrame = CFrame.lookAt(origin + (target - origin) / 2, target)
+    part.Transparency = 0.1
+    part.Parent = Tracer.getFolder()
+
+    -- Add a texture to make it look like a laser streak
+    local texture = Instance.new("Texture")
+    texture.Texture = "rbxassetid://244221440" -- Classic glowing streak texture
+    texture.Face = Enum.NormalId.Top
+    texture.Transparency = 0.5
+    texture.Parent = part
+
+    -- Wait 2 seconds, then fade out smoothly
+    task.delay(2, function()
+        if part and part.Parent then
+            -- Tween the transparency (Parts CAN be tweened properly)
+            local tween = game:GetService("TweenService"):Create(
+                part, 
+                TweenInfo.new(0.3, Enum.EasingStyle.Linear), 
+                {Transparency = 1}
+            )
+            tween:Play()
+            
+            -- Destroy it after the fade finishes
+            tween.Completed:Connect(function()
+                part:Destroy()
+            end)
+        end
+    end)
+end
+
+function BloodWipe.step()
+    local now = os.clock()
+    if now < BloodWipe.nextCheck then return end
+    BloodWipe.nextCheck = now + 0.2
+    
+    if now - BloodWipe.lastWipe < 1.0 then return end
+
+    local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
+    if not playerGui then return end
+
+    local bloodFound = false
+
+    for _, obj in ipairs(playerGui:GetDescendants()) do
+        if obj:IsA("ImageLabel") or obj:IsA("Frame") or obj:IsA("ScreenGui") then
+            local name = string.lower(obj.Name)
+            
+            if string.find(name, "blood") or string.find(name, "splatter") or string.find(name, "damage") or string.find(name, "drip") then
+                
+                local isVisible = false
+                if obj:IsA("ScreenGui") then
+                    isVisible = obj.Enabled
+                else
+                    isVisible = obj.Visible and ((obj:IsA("ImageLabel") and obj.ImageTransparency < 0.9) or (obj:IsA("Frame") and obj.BackgroundTransparency < 0.9))
+                end
+
+                if isVisible then
+                    bloodFound = true
+                    if obj:IsA("ScreenGui") then
+                        obj.Enabled = false
+                    else
+                        obj.Visible = false
+                    end
+                end
+            end
+        end
+    end
+
+    if bloodFound then
+        BloodWipe.lastWipe = now
+        
+        if type(Input) == "table" and type(Input.tapKey) == "function" then
+            Input.tapKey("Y", "Wipe")
+        else
+            local vimOk, vim = pcall(game.GetService, game, "VirtualInputManager")
+            if vimOk and vim then
+                pcall(function() vim:SendKeyEvent(true, Enum.KeyCode.Y, false, game) end)
+                task.delay(0.05, function() pcall(function() vim:SendKeyEvent(false, Enum.KeyCode.Y, false, game) end) end)
+            end
+        end
+    end
+end
+
+function BloodWipe.stop()
+    if BloodWipe.connection then
+        BloodWipe.connection:Disconnect()
+        BloodWipe.connection = nil
+    end
+end
+
 function Visual.update()
     if not (settings.espPlayers or settings.espAllies or settings.espNPC or settings.espBoss or settings.espPickups or settings.espObjectives) then
         if next(Visual.characters) or next(Visual.pickups) or next(Visual.objectives) then
@@ -24262,6 +24338,13 @@ function World.targetPoint(model)
     return nil
 end
 
+function World.gatePoint(model)
+    if not model or not model:IsA("Model") then return nil end
+    local root = model:FindFirstChild("HumanoidRootPart")
+    if root and root:IsA("BasePart") then return root.Position end
+    return World.targetPoint(model)
+end
+
 function World.inAimFov(position)
     if settings.aimMode == "360" then return true end
     local camera = Workspace.CurrentCamera
@@ -24418,7 +24501,8 @@ function World.selectSilentTarget(origin, maxTravel, accept, npcOnly, checkWalls
     for _, model in ipairs(characters:GetChildren()) do
         if World.isHostile(model) and (not npcOnly or World.isZombie(model)) then
             local position = World.targetPoint(model)
-            if World.validPosition(position) and World.inAimFov(position) then
+            local gate = World.gatePoint(model) or position
+            if World.validPosition(position) and World.inAimFov(gate) then
                 local offset = position - origin
                 local distanceSquared = offset:Dot(offset)
                 if distanceSquared >= 0.0001 and distanceSquared <= maximumSquared and (not checkWalls or World.visible(origin, position, model)) then
@@ -24552,7 +24636,10 @@ function Silent.solve(origin, config, target, position, maxTravel, checkWalls)
     local fire = type(config.fire) == "table" and config.fire or nil
     local observed = Silent.speedTool == Combat.tool and Silent.speedFire == fire
     local speed = observed and Silent.liveSpeed or fire and tonumber(fire.fireSpeed) or nil
-    local acceleration = observed and Silent.liveAcceleration or fire and fire.acceleration or Vector3.zero
+    local acceleration = observed and Silent.liveAcceleration or Vector3.zero
+    if not observed and fire and typeof(fire.acceleration) == "Vector3" and fire.acceleration.Y < -0.01 and math.abs(fire.acceleration.Y) >= fire.acceleration.Magnitude * 0.7 then
+        acceleration = fire.acceleration
+    end
     local direction, time, predicted = Silent.intercept(origin, position, velocity, speed, acceleration, maxTravel)
     if not direction then return nil end
     if predicted and ((predicted - origin).Magnitude > maxTravel or checkWalls and not World.visible(origin, predicted, target)) then return nil end
@@ -24596,7 +24683,8 @@ function Silent.choose(origin, config, npcOnly)
     local rescan = now >= Silent.nextTargetScan or Silent.targetTravel ~= maxTravel or Silent.targetNpcOnly ~= npcOnly or Silent.targetWalls ~= checkWalls or not target or not World.isHostile(target) or npcOnly and not World.isZombie(target)
     if not rescan then
         position = World.targetPoint(target)
-        if not World.validPosition(position) or not World.inAimFov(position) then
+        local gate = World.gatePoint(target) or position
+        if not World.validPosition(position) or not World.inAimFov(gate) then
             rescan = true
         else
             local distance = (position - origin).Magnitude
@@ -24676,13 +24764,12 @@ function Silent.wrapNetwork(record, self, name, ...)
     end
 
     if settings.bulletTracer and name == "fire" and typeof(args[3]) == "Vector3" then
-        local muzzle = Silent.muzzle(tool, config)
+        local muzzle = shot.origin
         if muzzle then
             local dir = args[3]
             local params = RaycastParams.new()
             params.FilterType = Enum.RaycastFilterType.Exclude
             params.FilterDescendantsInstances = {LocalPlayer.Character, Workspace.CurrentCamera}
-            
             local hit = Workspace:Raycast(muzzle, dir * 1000, params)
             local target = hit and hit.Position or (muzzle + dir * 1000)
             
@@ -25523,6 +25610,40 @@ function Punch.press()
     return Input.tapKey(keyName, "Punch")
 end
 
+function Punch.doBackstab(target, targetPart)
+    local character, humanoid, root = Motion.resolve()
+    if not character or not root then return end
+    
+    local look = Vector3.new(targetPart.CFrame.LookVector.X, 0, targetPart.CFrame.LookVector.Z)
+    if look.Magnitude < 0.05 then look = Vector3.new(0, 0, 1) end
+    look = look.Unit
+    
+    local behindPos = targetPart.Position - (look * 2.5)
+    
+    local rayParams = RaycastParams.new()
+    rayParams.FilterType = Enum.RaycastFilterType.Exclude
+    rayParams.FilterDescendantsInstances = {character, target}
+    
+    local wallCheck = Workspace:Raycast(targetPart.Position, (behindPos - targetPart.Position), rayParams)
+    if wallCheck then return end
+    local faceBackCFrame = CFrame.lookAt(behindPos, targetPart.Position)
+    character:PivotTo(faceBackCFrame)
+    root.AssemblyLinearVelocity = Vector3.zero
+    
+    local camera = Workspace.CurrentCamera
+    if camera then
+        local head = character:FindFirstChild("Head")
+        local camOrigin = head and head.Position or (behindPos + Vector3.new(0, 2, 0))
+        camera.CFrame = CFrame.lookAt(camOrigin, targetPart.Position)
+    end
+    
+    task.wait(0.12) 
+    
+    if Punch.press() then
+        Punch.nextAttempt = os.clock() + 5.05
+    end
+end
+
 function Punch.step()
     local now = os.clock()
     if now < Punch.nextCheck then return end
@@ -25566,24 +25687,40 @@ function Punch.step()
     if flatLook.Magnitude < 0.05 then return end
     flatLook = flatLook.Unit
     
-    local best, closest = nil, settings.punchRange * settings.punchRange
+        local best, closest = nil, settings.punchRange * settings.punchRange
     for _, model in ipairs(characters:GetChildren()) do
         if World.isZombie(model) and not Punch.immune(model) then
             local targetHumanoid = model:FindFirstChildOfClass("Humanoid")
             local lowHpOk = not settings.punchLowHpOnly or (targetHumanoid and targetHumanoid.Health > 0 and targetHumanoid.Health < 80)
+            
             if lowHpOk then
                 local part = model:FindFirstChild("HumanoidRootPart") or World.characterPart(model)
                 if part and part:IsA("BasePart") then
                     local offset = part.Position - root.Position
-                    local flat = Vector3.new(offset.X, 0, offset.Z)
+                    local dist = offset.Magnitude
                     local squared = offset:Dot(offset)
-                    local relative = part.AssemblyLinearVelocity - root.AssemblyLinearVelocity
-                    if not World.validPosition(relative) then relative = Vector3.zero end
-                    local predicted = offset + relative * 0.12
-                    if squared <= closest and math.abs(offset.Y) <= 5 and flat.Magnitude > 0.01
-                        and flatLook:Dot(flat.Unit) >= 0.7 and predicted.Magnitude <= settings.punchRange + 0.5
-                        and World.visible(root.Position, part.Position, model) then
-                        best, closest = model, squared
+                    
+                    if World.visible(root.Position, part.Position, model) then
+                        
+                        if settings.punchBackstab and string.find(string.lower(model.Name), "vorax", 1, true) then
+                            if dist >= 11 and dist <= 13 then 
+                                Punch.nextAttempt = now + 5.05
+                                task.spawn(Punch.doBackstab, model, part)
+                                return 
+                            end
+                        end
+                        
+                        if squared <= closest then
+                            local flat = Vector3.new(offset.X, 0, offset.Z)
+                            local relative = part.AssemblyLinearVelocity - root.AssemblyLinearVelocity
+                            if not World.validPosition(relative) then relative = Vector3.zero end
+                            local predicted = offset + relative * 0.12
+                            
+                            if math.abs(offset.Y) <= 5 and flat.Magnitude > 0.01
+                                and flatLook:Dot(flat.Unit) >= 0.7 and predicted.Magnitude <= settings.punchRange + 0.5 then
+                                best, closest = model, squared
+                            end
+                        end
                     end
                 end
             end
@@ -26086,6 +26223,7 @@ function UI.build()
     UI.addToggle(melee, "autoPunch", "Auto Punch")
     UI.addSlider(melee, "punchRange", "Auto Punch Range")
     UI.addChoice(melee, "punchKey", "Punch Key")
+    UI.addToggle(melee, "punchBackstab", "Auto Backstab (Vorax only)")
     UI.addToggle(melee, "punchLowHpOnly", "Punch Only Below 80 HP")
     UI.addSlider(melee, "punchDelay", "Punch Delay", "ms")
 
@@ -26098,7 +26236,7 @@ function UI.build()
     local utilityGroup = combatPage:CreateGroupbox({Name = "Utility", Side = "Right"})
     UI.addToggle(utilityGroup, "removeShield", "Always Remove Shielder's Shield")
     utilityGroup:Button({
-        Name = "Remove Shields",
+        Name = "Strip Shields",
         Callback = function()
             World.removeShields()
             App.notice("Shields removed")
@@ -26121,6 +26259,7 @@ function UI.build()
     local visual = visualsPage:CreateGroupbox({Name = "Display and Lighting", Side = "Right"})
     UI.addToggle(visual, "fullbright", "Fullbright")
     UI.addToggle(visual, "noFog", "Remove Fog")
+    UI.addToggle(visual, "autoWipeBlood", "Auto Wipe Blood")
     UI.addToggle(visual, "fovEnabled", "Change FOV")
     UI.addSlider(visual, "fov", "Field of View")
     UI.addToggle(visual, "crosshair", "Center Crosshair")
@@ -26633,6 +26772,9 @@ App.connect(RunService.Heartbeat, function(delta)
         if Optimizer.mode > 0 then
             Guard.set("fpsOptimization", Lighting, "GlobalShadows", false, false)
         end
+        if settings.autoWipeBlood then
+            App.safe("Auto Wipe Blood", BloodWipe.step)
+        end
         if settings.fullbright or settings.noFog or Guard.groups.light or Guard.groups.fog then
             App.safe("Lighting", Visual.updateLighting)
         end
@@ -26794,10 +26936,6 @@ task.defer(function()
     UI.syncVisibility()
     local window = UI.window
     if window and type(window.LoadAutoload) == "function" then
-        local excluded = {}
-        for key in pairs(startupManual) do excluded["HR_" .. key] = true end
-        window._startupExcluded = excluded
         pcall(window.LoadAutoload, window)
-        window._startupExcluded = nil
     end
 end)
